@@ -1,31 +1,27 @@
 {
   "name": "agent-sandbox",
   "version": "1.0.0",
-  "description": "Lightweight Agent Sandbox - Run AI tasks in isolated Docker containers",
-  "main": "api/server.js",
+  "description": "Complete Agent Sandbox - AI-powered task execution platform",
+  "type": "module",
+  "main": "src/api/server.js",
   "scripts": {
-    "start": "node api/server.js",
-    "dev": "node --watch api/server.js",
+    "start": "node src/api/server.js",
+    "dev": "node --watch src/api/server.js",
     "test": "node --test tests/*.test.js",
-    "build:image": "docker build -t agent-executor:latest ./docker",
+    "build:image": "docker build -t agent-sandbox:latest .",
     "up": "docker-compose up -d",
     "down": "docker-compose down",
     "logs": "docker-compose logs -f"
   },
-  "keywords": ["agent", "sandbox", "docker", "ai"],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
-    "hono": "^4.11.7",
+    "openai": "^4.0.0",
+    "@anthropic-ai/sdk": "^0.0.0",
+    "axios": "^1.6.0",
+    "octokit": "^3.0.0",
     "ioredis": "^5.4.1",
-    "dockerode": "^4.0.0",
-    "uuid": "^10.0.0",
-    "zod": "^3.23.8"
+    "uuid": "^10.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"
-  },
-  "engines": {
-    "node": ">=20.0.0"
   }
 }

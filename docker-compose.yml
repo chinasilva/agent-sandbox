@@ -4,43 +4,15 @@ services:
   api:
     build:
       context: .
-      dockerfile: docker/api.Dockerfile
+      dockerfile: docker/Dockerfile
     ports:
       - "3000:3000"
     environment:
       - REDIS_URL=redis://redis:6379
-      - DOCKER_HOST=/var/run/docker.sock
       - CONFIG_PATH=/app/config/default.json
+      - NODE_ENV=production
     volumes:
       - ./config:/app/config:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - agent-network
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  executor:
-    build:
-      context: .
-      dockerfile: docker/executor.Dockerfile
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - CONFIG_PATH=/app/config/default.json
-    volumes:
-      - ./config:/app/config:ro
-      - ./workspace:/app/workspace
-      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - agent-network
     deploy:
@@ -48,9 +20,12 @@ services:
         limits:
           memory: 256M
           cpus: '0.5'
-    depends_on:
-      redis:
-        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 10s
 
   redis:
     image: redis:7-alpine

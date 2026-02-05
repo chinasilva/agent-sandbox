@@ -1,15 +1,38 @@
 /**
  * Agent Sandbox API Server
- * Native Node.js HTTP server (no Hono dependency)
+ * Native Node.js HTTP server
  */
 
-import { v4 as uuidv4 } from 'uuid';
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+// Try to load Redis
+let Redis = null;
+let redis = null;
+let redisAvailable = false;
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+try {
+  Redis = require('ioredis');
+  if (process.env.REDIS_URL) {
+    redis = new Redis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: 1,
+      retryStrategy: () => null,
+    });
+    redis.on('connect', () => {
+      redisAvailable = true;
+      console.log('✅ Redis connected');
+    });
+    redis.on('error', (e) => {
+      console.log('⚠️ Redis error:', e.message);
+    });
+  }
+} catch (e) {
+  console.log('⚠️ Redis not available');
+}
+
+const { v4: uuidv4 } = require('uuid');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const __dirname = path.dirname(require.main?.filename || __filename);
 const configPath = process.env.CONFIG_PATH || path.join(__dirname, '..', 'config', 'default.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
@@ -41,7 +64,7 @@ function sendJSON(res, status, data) {
 // Route handler
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const path = url.pathname;
+  const pathname = url.pathname;
   const method = req.method;
 
   // CORS headers
@@ -57,16 +80,19 @@ async function handleRequest(req, res) {
 
   try {
     // GET /health
-    if (method === 'GET' && path === '/health') {
+    if (method === 'GET' && pathname === '/health') {
       return sendJSON(res, 200, {
         status: 'healthy',
-        mode: 'memory',
+        mode: redisAvailable ? 'redis' : 'memory',
+        redis: redisAvailable ? 'connected' : 'disconnected',
+        docker: 'available',
+        tasks: memoryStore.size,
         timestamp: new Date().toISOString(),
       });
     }
 
     // POST /api/v1/tasks
-    if (method === 'POST' && path === '/api/v1/tasks') {
+    if (method === 'POST' && pathname === '/api/v1/tasks') {
       const body = await parseBody(req);
       const { task, tools = [], apiKey } = body;
 
@@ -98,7 +124,7 @@ async function handleRequest(req, res) {
     }
 
     // GET /api/v1/tasks/:taskId/poll
-    const taskMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)\/poll$/);
+    const taskMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/poll$/);
     if (method === 'GET' && taskMatch) {
       const taskId = taskMatch[1];
       const taskData = memoryStore.get(`task:${taskId}`);
@@ -120,10 +146,11 @@ async function handleRequest(req, res) {
     }
 
     // GET /metrics
-    if (method === 'GET' && path === '/metrics') {
+    if (method === 'GET' && pathname === '/metrics') {
       return sendJSON(res, 200, {
-        agent_mode: 'memory',
+        agent_mode: redisAvailable ? 'redis' : 'memory',
         agent_tasks_total: memoryStore.size,
+        agent_redis: redisAvailable ? 'connected' : 'disconnected',
         agent_timestamp: Date.now(),
       });
     }
@@ -147,7 +174,7 @@ const server = http.createServer(handleRequest);
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Agent Sandbox API running on http://${HOST}:${PORT}`);
   console.log(`📋 Health: http://${HOST}:${PORT}/health`);
-  console.log(`✅ Mode: Memory (testing without Redis/Docker)`);
+  console.log(`✅ Mode: ${redisAvailable ? 'Redis' : 'Memory'}`);
 });
 
 process.on('SIGTERM', () => {
