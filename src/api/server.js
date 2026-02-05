@@ -10,7 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const configPath = process.env.CONFIG_PATH || path.join(__dirname, '..', 'config', 'default.json');
+const configPath = process.env.CONFIG_PATH || path.join(__dirname, '..', '..', 'config', 'default.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
 // In-memory task storage
@@ -54,13 +54,11 @@ function registerSkill(name, handler) {
 
 // Load skills
 async function loadSkills() {
-  const skillsDir = path.join(__dirname, '..', 'src', 'skills');
-  
   const skillFiles = [
-    { name: 'web-search', file: './src/skills/web-search/index.js' },
-    { name: 'code-generator', file: './src/skills/code-generator/index.js' },
-    { name: 'report-generator', file: './src/skills/report-generator/index.js' },
-    { name: 'github-publisher', file: './src/skills/github-publisher/index.js' },
+    { name: 'web-search', file: '../skills/web-search/index.js' },
+    { name: 'code-generator', file: '../skills/code-generator/index.js' },
+    { name: 'report-generator', file: '../skills/report-generator/index.js' },
+    { name: 'github-publisher', file: '../skills/github-publisher/index.js' },
   ];
   
   for (const skill of skillFiles) {

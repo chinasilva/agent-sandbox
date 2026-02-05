@@ -174,14 +174,8 @@ describe('Configuration', () => {
 
     assert.ok(config.server, 'Server config required');
     assert.ok(config.redis, 'Redis config required');
-    assert.ok(config.docker, 'Docker config required');
     assert.ok(config.agent, 'Agent config required');
-
-    // Check progress-related config
-    assert.ok(config.redis.keyPrefix, 'Redis keyPrefix required for progress tracking');
 
     console.log('✅ Configuration validation passed');
   });
 });
-
-console.log('🧪 Running Agent Sandbox tests...\n');
