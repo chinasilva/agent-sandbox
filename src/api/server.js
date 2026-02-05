@@ -1,6 +1,6 @@
 /**
  * Agent Sandbox API Server
- * Complete AI Agent with Skills System
+ * Complete AI Agent with Skills System and User Management
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -13,7 +13,33 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const configPath = process.env.CONFIG_PATH || path.join(__dirname, '..', '..', 'config', 'default.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-// In-memory task storage
+// Import user database and auth middleware
+import {
+  createUser,
+  validatePassword,
+  findUserById,
+  regenerateApiKey,
+  updateCredits,
+  deductTaskCredits,
+  getCredits,
+  getUserTasks,
+  getUserTaskCount,
+  createTask,
+  updateTask,
+  getTaskById,
+  getAllUsers,
+  getUserStats,
+  usernameExists,
+} from '../db/user.js';
+
+import {
+  generateTokenPair,
+  combinedAuthMiddleware,
+  adminMiddleware,
+  creditCheckMiddleware,
+} from '../middleware/auth.js';
+
+// In-memory task storage (for current session)
 const taskStore = new Map();
 const taskResults = new Map();
 
@@ -91,7 +117,7 @@ async function executeSkill(skillName, input) {
  * Execute task with agent
  */
 async function executeTask(taskData) {
-  const { id: taskId, task, tools } = taskData;
+  const { id: taskId, task, tools, userId } = taskData;
   const results = {
     taskId,
     steps: [],
@@ -251,8 +277,8 @@ async function handleRequest(req, res) {
 
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
 
   if (method === 'OPTIONS') {
     res.writeHead(204);
@@ -261,6 +287,335 @@ async function handleRequest(req, res) {
   }
 
   try {
+    // ==================== AUTH ROUTES ====================
+    
+    // POST /api/v1/auth/register - Register new user
+    if (method === 'POST' && pathname === '/api/v1/auth/register') {
+      const body = await parseBody(req);
+      const { username, password } = body;
+
+      if (!username || !password) {
+        return sendJSON(res, 400, { error: 'Username and password required' });
+      }
+
+      if (username.length < 3) {
+        return sendJSON(res, 400, { error: 'Username must be at least 3 characters' });
+      }
+
+      if (password.length < 6) {
+        return sendJSON(res, 400, { error: 'Password must be at least 6 characters' });
+      }
+
+      if (await usernameExists(username)) {
+        return sendJSON(res, 409, { error: 'Username already exists' });
+      }
+
+      const user = createUser(username, password);
+      const tokens = generateTokenPair(user);
+
+      return sendJSON(res, 201, {
+        message: 'User registered successfully',
+        user: {
+          id: user.id,
+          username: user.username,
+          credits: user.credits,
+          isAdmin: user.isAdmin,
+          createdAt: user.createdAt,
+        },
+        ...tokens,
+      });
+    }
+
+    // POST /api/v1/auth/login - Login user
+    if (method === 'POST' && pathname === '/api/v1/auth/login') {
+      const body = await parseBody(req);
+      const { username, password } = body;
+
+      if (!username || !password) {
+        return sendJSON(res, 400, { error: 'Username and password required' });
+      }
+
+      const user = validatePassword(username, password);
+      
+      if (!user) {
+        return sendJSON(res, 401, { error: 'Invalid username or password' });
+      }
+
+      const tokens = generateTokenPair(user);
+
+      return sendJSON(res, 200, {
+        message: 'Login successful',
+        user: {
+          id: user.id,
+          username: user.username,
+          credits: user.credits,
+          isAdmin: user.isAdmin,
+          createdAt: user.createdAt,
+        },
+        ...tokens,
+      });
+    }
+
+    // POST /api/v1/auth/refresh - Refresh access token
+    if (method === 'POST' && pathname === '/api/v1/auth/refresh') {
+      const body = await parseBody(req);
+      const { refreshToken } = body;
+
+      if (!refreshToken) {
+        return sendJSON(res, 400, { error: 'Refresh token required' });
+      }
+
+      const { verifyToken } = require('../middleware/auth.js');
+      const decoded = verifyToken(refreshToken);
+
+      if (!decoded || decoded.type !== 'refresh') {
+        return sendJSON(res, 401, { error: 'Invalid refresh token' });
+      }
+
+      const user = findUserById(decoded.userId);
+      if (!user) {
+        return sendJSON(res, 401, { error: 'User not found' });
+      }
+
+      const tokens = generateTokenPair(user);
+
+      return sendJSON(res, 200, {
+        message: 'Token refreshed',
+        ...tokens,
+      });
+    }
+
+    // ==================== USER ROUTES ====================
+
+    // GET /api/v1/user/profile - Get current user profile
+    if (method === 'GET' && pathname === '/api/v1/user/profile') {
+      const authResult = await new Promise((resolve) => {
+        combinedAuthMiddleware(req, res, (err) => {
+          if (err) resolve(false);
+          else resolve(true);
+        });
+      });
+
+      if (!authResult) {
+        return sendJSON(res, 401, { error: 'Authentication required' });
+      }
+
+      const user = findUserById(req.user.id);
+      const stats = getUserStats(req.user.id);
+      const credits = getCredits(req.user.id);
+
+      return sendJSON(res, 200, {
+        user: {
+          id: user.id,
+          username: user.username,
+          apiKey: user.api_key,
+          credits: credits,
+          isAdmin: user.is_admin,
+          createdAt: user.created_at,
+        },
+        stats,
+      });
+    }
+
+    // PUT /api/v1/user/api-key - Regenerate API key
+    if (method === 'PUT' && pathname === '/api/v1/user/api-key') {
+      const authResult = await new Promise((resolve) => {
+        combinedAuthMiddleware(req, res, (err) => {
+          if (err) resolve(false);
+          else resolve(true);
+        });
+      });
+
+      if (!authResult) {
+        return sendJSON(res, 401, { error: 'Authentication required' });
+      }
+
+      const newApiKey = regenerateApiKey(req.user.id);
+
+      return sendJSON(res, 200, {
+        message: 'API key regenerated',
+        apiKey: newApiKey,
+      });
+    }
+
+    // PUT /api/v1/user/credits - Update user credits (admin only)
+    if (method === 'PUT' && pathname === '/api/v1/user/credits') {
+      const authResult = await new Promise((resolve) => {
+        combinedAuthMiddleware(req, res, (err) => {
+          if (err) resolve(false);
+          else resolve(true);
+        });
+      });
+
+      if (!authResult) {
+        return sendJSON(res, 401, { error: 'Authentication required' });
+      }
+
+      if (!req.user.isAdmin) {
+        return sendJSON(res, 403, { error: 'Admin access required' });
+      }
+
+      const body = await parseBody(req);
+      const { userId, amount, description } = body;
+
+      if (!userId || amount === undefined) {
+        return sendJSON(res, 400, { error: 'User ID and amount required' });
+      }
+
+      const updatedUser = updateCredits(userId, amount, description || 'Admin adjustment');
+
+      return sendJSON(res, 200, {
+        message: 'Credits updated',
+        user: {
+          id: updatedUser.id,
+          username: updatedUser.username,
+          credits: updatedUser.credits,
+        },
+      });
+    }
+
+    // GET /api/v1/user/tasks - Get user's task history
+    if (method === 'GET' && pathname === '/api/v1/user/tasks') {
+      const authResult = await new Promise((resolve) => {
+        combinedAuthMiddleware(req, res, (err) => {
+          if (err) resolve(false);
+          else resolve(true);
+        });
+      });
+
+      if (!authResult) {
+        return sendJSON(res, 401, { error: 'Authentication required' });
+      }
+
+      const limit = parseInt(url.searchParams.get('limit')) || 20;
+      const offset = parseInt(url.searchParams.get('offset')) || 0;
+
+      const tasks = getUserTasks(req.user.id, limit, offset);
+      const total = getUserTaskCount(req.user.id);
+
+      return sendJSON(res, 200, {
+        tasks,
+        pagination: {
+          total,
+          limit,
+          offset,
+          hasMore: offset + tasks.length < total,
+        },
+      });
+    }
+
+    // GET /api/v1/admin/users - Get all users (admin only)
+    if (method === 'GET' && pathname === '/api/v1/admin/users') {
+      const authResult = await new Promise((resolve) => {
+        combinedAuthMiddleware(req, res, (err) => {
+          if (err) resolve(false);
+          else resolve(true);
+        });
+      });
+
+      if (!authResult) {
+        return sendJSON(res, 401, { error: 'Authentication required' });
+      }
+
+      if (!req.user.isAdmin) {
+        return sendJSON(res, 403, { error: 'Admin access required' });
+      }
+
+      const users = getAllUsers();
+
+      return sendJSON(res, 200, {
+        users,
+        count: users.length,
+      });
+    }
+
+    // ==================== TASK ROUTES ====================
+
+    // POST /api/v1/tasks - Submit task (requires auth + credits)
+    if (method === 'POST' && pathname === '/api/v1/tasks') {
+      const authResult = await new Promise((resolve) => {
+        combinedAuthMiddleware(req, res, (err) => {
+          if (err) resolve(false);
+          else resolve(true);
+        });
+      });
+
+      if (!authResult) {
+        return sendJSON(res, 401, { error: 'Authentication required' });
+      }
+
+      // Check credits
+      const currentCredits = getCredits(req.user.id);
+      if (currentCredits <= 0) {
+        return sendJSON(res, 402, {
+          error: 'Insufficient credits',
+          code: 'NO_CREDITS',
+          currentCredits: currentCredits,
+        });
+      }
+
+      const body = await parseBody(req);
+      const { task, tools = [] } = body;
+
+      if (!task) {
+        return sendJSON(res, 400, { error: 'Task description required' });
+      }
+
+      // Create task in database
+      const dbTask = createTask(req.user.id, task, tools);
+      
+      const taskId = dbTask.id;
+      const taskData = {
+        ...dbTask,
+        userId: req.user.id,
+      };
+
+      taskStore.set(taskId, taskData);
+      
+      // Deduct credits
+      deductTaskCredits(req.user.id);
+      
+      // Execute task asynchronously
+      executeTask(taskData).then(result => {
+        updateTask(taskId, {
+          status: result.status,
+          result: result.output,
+          progress: 100,
+        });
+        
+        taskResults.set(taskId, {
+          status: result.status,
+          progress: 100,
+          step: result.status,
+          result: result.output,
+          completedAt: result.completedAt,
+          duration: result.duration,
+        });
+      }).catch(error => {
+        updateTask(taskId, {
+          status: 'failed',
+          error: error.message,
+        });
+        taskResults.set(taskId, {
+          status: 'failed',
+          progress: 0,
+          step: 'error',
+          error: error.message,
+        });
+      });
+
+      return sendJSON(res, 200, {
+        taskId,
+        status: 'pending',
+        message: 'Task submitted successfully',
+        pollUrl: `/api/v1/tasks/${taskId}/poll`,
+        skills: Array.from(skills.keys()),
+        remainingCredits: currentCredits - 1,
+      });
+    }
+
+    // ==================== EXISTING ROUTES ====================
+
     // GET /health
     if (method === 'GET' && pathname === '/health') {
       return sendJSON(res, 200, {
@@ -277,63 +632,6 @@ async function handleRequest(req, res) {
       return sendJSON(res, 200, {
         skills: Array.from(skills.keys()),
         count: skills.size,
-      });
-    }
-
-    // POST /api/v1/tasks - Submit task
-    if (method === 'POST' && pathname === '/api/v1/tasks') {
-      const body = await parseBody(req);
-      const { task, tools = [], apiKey } = body;
-
-      if (!apiKey) {
-        return sendJSON(res, 401, { error: 'API key required' });
-      }
-
-      const taskId = uuidv4();
-      const taskData = {
-        id: taskId,
-        task,
-        tools,
-        status: 'pending',
-        progress: 0,
-        step: 'queued',
-        message: 'Task queued',
-        createdAt: new Date().toISOString(),
-        result: null,
-      };
-
-      taskStore.set(taskId, taskData);
-      
-      // Execute task asynchronously
-      executeTask(taskData).then(result => {
-        taskResults.set(taskId, {
-          status: result.status,
-          progress: 100,
-          step: result.status,
-          result: result.output,
-          completedAt: result.completedAt,
-          duration: result.duration,
-        });
-        taskStore.set(taskId, {
-          ...taskData,
-          ...result,
-          status: result.status,
-        });
-      }).catch(error => {
-        taskResults.set(taskId, {
-          status: 'failed',
-          progress: 0,
-          step: 'error',
-          error: error.message,
-        });
-      });
-
-      return sendJSON(res, 200, {
-        taskId,
-        status: 'pending',
-        message: 'Task submitted successfully',
-        pollUrl: `/api/v1/tasks/${taskId}/poll`,
-        skills: Array.from(skills.keys()),
       });
     }
 
@@ -369,7 +667,15 @@ async function handleRequest(req, res) {
       const result = taskResults.get(taskId);
 
       if (!taskData) {
-        return sendJSON(res, 404, { error: 'Task not found' });
+        // Try to get from database
+        const dbTask = getTaskById(taskId);
+        if (!dbTask) {
+          return sendJSON(res, 404, { error: 'Task not found' });
+        }
+        return sendJSON(res, 200, {
+          task: dbTask,
+          result: result,
+        });
       }
 
       return sendJSON(res, 200, {
@@ -416,6 +722,19 @@ async function handleRequest(req, res) {
       });
     }
 
+    // ==================== FRONTEND ====================
+
+    // Serve static frontend
+    if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
+      const frontendPath = path.join(__dirname, '..', 'www', 'index.html');
+      if (fs.existsSync(frontendPath)) {
+        const content = fs.readFileSync(frontendPath, 'utf-8');
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(content);
+        return;
+      }
+    }
+
     // 404
     res.writeHead(404);
     res.end('Not Found');
@@ -437,6 +756,7 @@ server.listen(PORT, HOST, () => {
   console.log(`📋 Health: http://${HOST}:${PORT}/health`);
   console.log(`✅ Skills loaded: ${skills.size}`);
   console.log(`🎯 Mode: ${redisAvailable ? 'Redis' : 'Memory'}`);
+  console.log(`👥 User system: enabled (SQLite)`);
 });
 
 process.on('SIGTERM', () => {
