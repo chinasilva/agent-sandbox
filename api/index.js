@@ -8,7 +8,7 @@ const { Pool } = pg;
 
 // Create connection pool - reads from DATABASE_URL environment variable
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || process.env.SUPABASE_URL || process.env.sandbox_POSTGRES_URL,
+  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || process.env.sandbox_POSTGRES_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
