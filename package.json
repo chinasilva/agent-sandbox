@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Agent Sandbox - AI-powered task execution platform",
   "type": "module",
-  "main": "api/server.js",
+  "main": "api/index.js",
   "scripts": {
     "start": "node api/server-local.js",
     "dev": "node --watch api/server-local.js"
