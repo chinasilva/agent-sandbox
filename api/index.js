@@ -159,6 +159,11 @@ export default async function handler(req, res) {
           VALUES ($1, $2, $3, $4, 100, 0)
         `, [id, username, passwordHash, apiKey]);
 
+        // Generate tokens
+        const crypto = await import('crypto');
+        const accessToken = Buffer.from(`${id}:${Date.now()}`).toString('base64');
+        const refreshToken = crypto.randomUUID();
+
         return res.status(201).json({
           message: 'User registered successfully',
           user: {
@@ -169,6 +174,9 @@ export default async function handler(req, res) {
             createdAt: new Date().toISOString(),
           },
           apiKey,
+          accessToken,
+          refreshToken,
+          expiresIn: '24h',
         });
       } catch (error) {
         if (error.code === '23505') { // PostgreSQL unique violation
@@ -204,7 +212,9 @@ export default async function handler(req, res) {
 
         // Generate token
         const crypto = await import('crypto');
-        const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
+        const crypto = await import('crypto');
+        const accessToken = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
+        const refreshToken = crypto.randomUUID();
 
         return res.json({
           message: 'Login successful',
@@ -215,7 +225,8 @@ export default async function handler(req, res) {
             isAdmin: user.is_admin === 1 || user.is_admin === true,
             createdAt: user.created_at,
           },
-          accessToken: token,
+          accessToken,
+          refreshToken,
           expiresIn: '24h',
         });
       } catch (error) {
