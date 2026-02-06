@@ -9,13 +9,19 @@ import { Pool } from 'pg';
 // Check if we should use @vercel/postgres (fast) or pg (flexible)
 const USE_VERCEL_POSTGRES = process.env.VERCEL === '1' && process.env.POSTGRES_URL;
 
-// Create connection pool for standard PostgreSQL
+// Create connection pool for standard PostgreSQL (Supabase)
 let pool = null;
-if (!USE_VERCEL_POSTGRES && (process.env.DATABASE_URL || process.env.sandbox_POSTGRES_URL)) {
+const SUPABASE_URL = process.env.SANDBOX_POSTGRES_URL || process.env.sandbox_POSTGRES_URL;
+const SUPABASE_HOST = process.env.SANDBOX_POSTGRES_HOST || process.env.sandbox_POSTGRES_HOST;
+const SUPABASE_USER = process.env.SANDBOX_POSTGRES_USER || process.env.sandbox_POSTGRES_USER;
+const SUPABASE_PASSWORD = process.env.SANDBOX_POSTGRES_PASSWORD || process.env.sandbox_POSTGRES_PASSWORD;
+const SUPABASE_DATABASE = process.env.SANDBOX_POSTGRES_DATABASE || process.env.sandbox_POSTGRES_DATABASE;
+
+if (!USE_VERCEL_POSTGRES && SUPABASE_URL) {
   pool = new Pool({
-    connectionString: process.env.DATABASE_URL || process.env.sandbox_POSTGRES_URL,
+    connectionString: SUPABASE_URL,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: 15000, // 15秒超时
     max: 1,
   });
 }
@@ -29,43 +35,34 @@ let initialized = false;
 async function initDatabase() {
   if (initialized) return true;
   
+  console.log('🔄 Initializing database...');
+  console.log('  Vercel:', process.env.VERCEL);
+  console.log('  Supabase URL:', SUPABASE_URL ? 'configured' : 'not configured');
+  console.log('  Vercel Postgres:', USE_VERCEL_POSTGRES ? 'enabled' : 'disabled');
+  
   try {
     if (USE_VERCEL_POSTGRES) {
       // Use @vercel/postgres
-      await sql`
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          username TEXT UNIQUE NOT NULL,
-          password_hash TEXT NOT NULL,
-          api_key TEXT UNIQUE NOT NULL,
-          credits INTEGER DEFAULT 100,
-          is_admin INTEGER DEFAULT 0,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `;
-    } else if (pool) {
-      // Use standard pg
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          username TEXT UNIQUE NOT NULL,
-          password_hash TEXT NOT NULL,
-          api_key TEXT UNIQUE NOT NULL,
-          credits INTEGER DEFAULT 100,
-          is_admin INTEGER DEFAULT 0,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `, [], { timeout: 5000 });
+      console.log('  Using: @vercel/postgres');
+      await sql`SELECT 1`;
+    } else if (pool && SUPABASE_URL) {
+      // Use Supabase
+      console.log('  Using: Supabase');
+      const result = await pool.query('SELECT NOW()');
+      console.log('  Connected:', result.rows[0]?.now || 'success');
+    } else {
+      console.log('  No database configured, running in demo mode');
+      return false;
     }
     
     initialized = true;
-    console.log('✅ Database initialized');
+    console.log('✅ Database connected successfully');
     return true;
   } catch (error) {
-    console.error('❌ Database init failed:', error.message);
-    // Don't block deployment - table might already exist
+    console.error('❌ Database connection failed:', error.message);
+    console.error('  Code:', error.code);
+    console.error('  Detail:', error.detail || 'N/A');
+    // Don't block deployment
     initialized = true;
     return false;
   }
@@ -109,10 +106,30 @@ export default async function handler(req, res) {
   try {
     // Health check
     if (pathname === '/health' && method === 'GET') {
+      let dbStatus = 'not configured';
+      let dbLatency = null;
+      
+      try {
+        if (USE_VERCEL_POSTGRES) {
+          const start = Date.now();
+          await sql`SELECT 1`;
+          dbLatency = Date.now() - start;
+          dbStatus = 'vercel-postgres';
+        } else if (pool && SUPABASE_URL) {
+          const start = Date.now();
+          await pool.query('SELECT 1');
+          dbLatency = Date.now() - start;
+          dbStatus = 'supabase';
+        }
+      } catch (e) {
+        dbStatus = 'error: ' + e.message;
+      }
+      
       return res.json({
         status: 'healthy',
-        mode: USE_VERCEL_POSTGRES ? 'vercel-postgres' : (pool ? 'postgres' : 'demo'),
-        database: pool || USE_VERCEL_POSTGRES ? 'connected' : 'not configured',
+        mode: USE_VERCEL_POSTGRES ? 'vercel-postgres' : (pool ? 'supabase' : 'demo'),
+        database: dbStatus,
+        latency_ms: dbLatency,
         timestamp: new Date().toISOString(),
       });
     }
