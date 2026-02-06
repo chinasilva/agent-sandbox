@@ -3,7 +3,11 @@
  * Zero external dependencies for fast deployment
  */
 
+console.log('🚀 API function initialized');
+
 export default async function handler(req, res) {
+  console.log('📝 Request:', req.method, req.url);
+  
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -30,6 +34,8 @@ export default async function handler(req, res) {
   }
 
   try {
+    console.log('✅ Request processing:', pathname);
+    
     // Health check - instant!
     if (pathname === '/health') {
       return res.json({
