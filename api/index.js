@@ -10,10 +10,14 @@ const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || process.env.sandbox_POSTGRES_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  connectionTimeoutMillis: 10000, // 10秒超时
+  idleTimeoutMillis: 30000,
+  max: 2, // 减少连接池数量，适合 serverless
 });
 
-// Initialize database tables
+// Initialize database tables (lazy init with timeout)
 let initialized = false;
+let initPromise = null;
 
 /**
  * Initialize database tables
@@ -21,65 +25,66 @@ let initialized = false;
 async function initDatabase() {
   if (initialized) return;
   
-  try {
-    // Create users table
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        api_key TEXT UNIQUE NOT NULL,
-        credits INTEGER DEFAULT 100,
-        is_admin INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    // Create tasks table
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        task TEXT NOT NULL,
-        tools TEXT,
-        status TEXT DEFAULT 'pending',
-        progress INTEGER DEFAULT 0,
-        step TEXT,
-        message TEXT,
-        result TEXT,
-        credits_used INTEGER DEFAULT 1,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    // Create credit_transactions table
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS credit_transactions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        amount INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        description TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    // Create indexes
+  // Prevent multiple simultaneous init calls
+  if (initPromise) return initPromise;
+  
+  initPromise = (async () => {
     try {
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`);
-      await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`);
-    } catch (e) {
-      // Indexes might already exist
+      // Create users table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY,
+          username TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL,
+          api_key TEXT UNIQUE NOT NULL,
+          credits INTEGER DEFAULT 100,
+          is_admin INTEGER DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `, [], { timeout: 5000 });
+      
+      // Create tasks table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS tasks (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          task TEXT NOT NULL,
+          tools TEXT,
+          status TEXT DEFAULT 'pending',
+          progress INTEGER DEFAULT 0,
+          step TEXT,
+          message TEXT,
+          result TEXT,
+          credits_used INTEGER DEFAULT 1,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `, [], { timeout: 5000 });
+      
+      // Create credit_transactions table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS credit_transactions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          amount INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          description TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `, [], { timeout: 5000 });
+      
+      initialized = true;
+      initPromise = null;
+      console.log('✅ Database initialized');
+    } catch (error) {
+      console.error('❌ Database init failed:', error.message);
+      // Don't throw - allow request to continue
+      // Table might already exist
     }
-    
-    initialized = true;
-    console.log('✅ Supabase/PostgreSQL database initialized');
-  } catch (error) {
-    console.error('❌ Database initialization failed:', error.message);
-    throw error;
-  }
+  })();
+  
+  return initPromise;
 }
 
 /**
