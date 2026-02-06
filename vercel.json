@@ -2,6 +2,20 @@
   "version": 2,
   "buildCommand": "npm install --no-optional",
   "installCommand": "npm install --no-optional",
-  "outputDirectory": "src/www",
-  "framework": null
+  "framework": null,
+  "functions": {
+    "api/server.js": {
+      "runtime": "nodejs22.x"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/server.js"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/server.js"
+    }
+  ]
 }
