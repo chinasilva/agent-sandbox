@@ -2,5 +2,16 @@
   "version": 2,
   "buildCommand": "npm install --no-optional",
   "installCommand": "npm install --no-optional",
-  "framework": null
+  "framework": null,
+  "outputDirectory": "src/www",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/server.js"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/server.js"
+    }
+  ]
 }
