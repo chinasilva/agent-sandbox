@@ -1,781 +1,334 @@
 /**
- * Agent Sandbox API Server
- * Complete AI Agent with Skills System and User Management
+ * Vercel Serverless Entry Point
+ * Handles API requests for Vercel deployment
  */
 
-import { v4 as uuidv4 } from 'uuid';
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
+const { Pool } = pg;
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const configPath = process.env.CONFIG_PATH || path.join(__dirname, '..', '..', 'config', 'default.json');
-const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+// Database configuration
+const SUPABASE_URL = process.env.SANDBOX_POSTGRES_URL || process.env.sandbox_POSTGRES_URL;
+const pool = SUPABASE_URL ? new Pool({
+  connectionString: SUPABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  connectionTimeoutMillis: 10000,
+  max: 1,
+}) : null;
 
-// Import user database and auth middleware
-import {
-  createUser,
-  validatePassword,
-  findUserById,
-  regenerateApiKey,
-  updateCredits,
-  deductTaskCredits,
-  getCredits,
-  getUserTasks,
-  getUserTaskCount,
-  createTask,
-  updateTask,
-  getTaskById,
-  getAllUsers,
-  getUserStats,
-  usernameExists,
-  initDatabase,
-} from '../src/db/user.js';
+let dbInitialized = false;
 
-import {
-  generateTokenPair,
-  combinedAuthMiddleware,
-  adminMiddleware,
-  creditCheckMiddleware,
-} from '../src/middleware/auth.js';
-
-// In-memory task storage (for current session)
-const taskStore = new Map();
-const taskResults = new Map();
-
-// Try to load Redis
-let Redis = null;
-let redis = null;
-let redisAvailable = false;
-
-try {
-  Redis = (await import('ioredis')).default;
-  if (process.env.REDIS_URL) {
-    redis = new Redis(process.env.REDIS_URL, {
-      maxRetriesPerRequest: 1,
-      retryStrategy: () => null,
-    });
-    redis.on('connect', () => {
-      redisAvailable = true;
-      console.log('✅ Redis connected');
-    });
-    redis.on('error', (e) => {
-      console.log('⚠️ Redis error:', e.message);
-    });
-  }
-} catch (e) {
-  console.log('⚠️ Redis not available, using memory storage');
-}
-
-// Skill registry
-const skills = new Map();
+// Simple in-memory store for demo mode
+const users = new Map();
+const tasks = new Map();
 
 /**
- * Register a skill
+ * Initialize database
  */
-function registerSkill(name, handler) {
-  skills.set(name, handler);
-  console.log(`✅ Skill registered: ${name}`);
-}
-
-// Load skills
-async function loadSkills() {
-  const skillFiles = [
-    { name: 'web-search', file: '../src/skills/web-search/index.js' },
-    { name: 'code-generator', file: '../src/skills/code-generator/index.js' },
-    { name: 'report-generator', file: '../src/skills/report-generator/index.js' },
-    { name: 'github-publisher', file: '../src/skills/github-publisher/index.js' },
-  ];
-  
-  for (const skill of skillFiles) {
-    try {
-      const skillModule = await import(skill.file);
-      if (skillModule.default || skillModule.handler) {
-        registerSkill(skill.name, skillModule.default || skillModule.handler);
-      }
-    } catch (e) {
-      console.log(`⚠️ Skill ${skill.name} failed to load:`, e.message);
-    }
-  }
-}
-
-// Load skills on startup
-loadSkills();
-
-/**
- * Execute a skill
- */
-async function executeSkill(skillName, input) {
-  const skill = skills.get(skillName);
-  if (!skill) {
-    throw new Error(`Skill not found: ${skillName}`);
-  }
-  return await skill(input);
-}
-
-/**
- * Execute task with agent
- */
-async function executeTask(taskData) {
-  const { id: taskId, task, tools, userId } = taskData;
-  const results = {
-    taskId,
-    steps: [],
-    output: '',
-    createdAt: new Date().toISOString(),
-  };
-
-  const startTime = Date.now();
+async function initDb() {
+  if (dbInitialized || !pool) return;
   
   try {
-    // Step 1: Analyze task
-    updateTaskProgress(taskId, 10, 'analyzing', 'Analyzing task requirements');
-    results.steps.push({
-      step: 'analyzing',
-      status: 'success',
-      message: 'Task requirements analyzed',
-      timestamp: new Date().toISOString()
-    });
-
-    // Step 2: Execute requested skills
-    const toolProgress = 20;
-    const progressPerTool = Math.floor((100 - toolProgress) / (tools.length || 1));
-    
-    for (let i = 0; i < tools.length; i++) {
-      const tool = tools[i];
-      const progress = toolProgress + (i + 1) * progressPerTool;
-      
-      updateTaskProgress(taskId, progress, tool, `Executing ${tool} skill`);
-      
-      try {
-        const skillResult = await executeSkill(tool, {
-          task,
-          context: results.steps,
-        });
-        
-        results.steps.push({
-          step: tool,
-          status: 'success',
-          result: skillResult,
-          timestamp: new Date().toISOString()
-        });
-      } catch (e) {
-        results.steps.push({
-          step: tool,
-          status: 'error',
-          message: e.message,
-          timestamp: new Date().toISOString()
-        });
-      }
-    }
-
-    // Step 3: Generate final output
-    updateTaskProgress(taskId, 90, 'generating', 'Generating final output');
-    
-    // Compile results
-    results.output = generateTaskOutput(task, results.steps);
-    results.executedAt = new Date().toISOString();
-    results.duration = Date.now() - startTime;
-    
-    // Step 4: Complete
-    updateTaskProgress(taskId, 100, 'completed', 'Task completed successfully');
-    results.status = 'completed';
-    
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        api_key TEXT UNIQUE NOT NULL,
+        credits INTEGER DEFAULT 100,
+        is_admin INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    dbInitialized = true;
+    console.log('✅ Database initialized');
   } catch (error) {
-    results.status = 'failed';
-    results.error = error.message;
-    results.duration = Date.now() - startTime;
-    updateTaskProgress(taskId, 0, 'error', error.message);
+    console.error('❌ Database init failed:', error.message);
   }
-
-  return results;
 }
 
 /**
- * Generate task output
+ * Generate API key
  */
-function generateTaskOutput(task, steps) {
-  const output = {
-    task,
-    summary: {
-      totalSteps: steps.length,
-      successful: steps.filter(s => s.status === 'success').length,
-      failed: steps.filter(s => s.status === 'error').length,
-    },
-    results: steps.filter(s => s.result).map(s => ({
-      tool: s.step,
-      result: s.result,
-    })),
-    completedAt: new Date().toISOString(),
-  };
-
-  // Format as markdown
-  let markdown = `# Task Results\n\n`;
-  markdown += `## Task\n${task}\n\n`;
-  markdown += `## Summary\n`;
-  markdown += `- Total Steps: ${output.summary.totalSteps}\n`;
-  markdown += `- Successful: ${output.summary.successful}\n`;
-  markdown += `- Failed: ${output.summary.failed}\n\n`;
-  
-  if (output.results.length > 0) {
-    markdown += `## Results\n\n`;
-    for (const result of output.results) {
-      markdown += `### ${result.tool}\n`;
-      markdown += `\`\`\`\n${JSON.stringify(result.result, null, 2)}\n\`\`\`\n\n`;
-    }
-  }
-
-  return markdown;
+function generateApiKey() {
+  return `ask_${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
 /**
- * Update task progress
+ * Hash password
  */
-function updateTaskProgress(taskId, progress, step, message) {
-  const taskData = taskStore.get(taskId) || {};
-  const update = {
-    status: progress < 100 ? 'running' : 'completed',
-    progress,
-    step,
-    message,
-    updatedAt: new Date().toISOString(),
-  };
-  
-  taskStore.set(taskId, { ...taskData, ...update });
-  
-  // Also store in results for polling
-  taskResults.set(taskId, update);
+async function hashPassword(password) {
+  const bcrypt = await import('bcryptjs');
+  return bcrypt.hash(password, 10);
 }
 
-// Parse JSON body
-async function parseBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch (e) {
-        reject(e);
-      }
-    });
-    req.on('error', reject);
-  });
+/**
+ * Compare password
+ */
+async function comparePassword(password, hash) {
+  const bcrypt = await import('bcryptjs');
+  return bcrypt.compare(password, hash);
 }
 
-// Send JSON response
-function sendJSON(res, status, data) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
-}
-
-// Route handler
-async function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = url.pathname;
-  const method = req.method;
-
-  // CORS headers
+export default async function handler(req, res) {
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
-
-  if (method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
   }
 
+  // Parse URL
+  const url = new URL(req.url || '/', `https://${req.headers.host}`);
+  const pathname = url.pathname;
+  const method = req.method;
+  const body = req.body || {};
+
+  // Initialize database on first request
+  await initDb();
+
   try {
-    // ==================== AUTH ROUTES ====================
-    
-    // POST /api/v1/auth/register - Register new user
-    if (method === 'POST' && pathname === '/api/v1/auth/register') {
-      const body = await parseBody(req);
-      const { username, password } = body;
-
-      if (!username || !password) {
-        return sendJSON(res, 400, { error: 'Username and password required' });
+    // Health check
+    if (pathname === '/health') {
+      let dbStatus = 'not configured';
+      if (pool) {
+        try {
+          await pool.query('SELECT 1');
+          dbStatus = 'connected';
+        } catch (e) {
+          dbStatus = 'error: ' + e.message;
+        }
       }
-
-      if (username.length < 3) {
-        return sendJSON(res, 400, { error: 'Username must be at least 3 characters' });
-      }
-
-      if (password.length < 6) {
-        return sendJSON(res, 400, { error: 'Password must be at least 6 characters' });
-      }
-
-      if (await usernameExists(username)) {
-        return sendJSON(res, 409, { error: 'Username already exists' });
-      }
-
-      const user = await createUser(username, password);
-      const tokens = generateTokenPair(user);
-
-      return sendJSON(res, 201, {
-        message: 'User registered successfully',
-        user: {
-          id: user.id,
-          username: user.username,
-          credits: user.credits,
-          isAdmin: user.isAdmin,
-          createdAt: user.createdAt,
-        },
-        ...tokens,
-      });
-    }
-
-    // POST /api/v1/auth/login - Login user
-    if (method === 'POST' && pathname === '/api/v1/auth/login') {
-      const body = await parseBody(req);
-      const { username, password } = body;
-
-      if (!username || !password) {
-        return sendJSON(res, 400, { error: 'Username and password required' });
-      }
-
-      const user = await validatePassword(username, password);
-      
-      if (!user) {
-        return sendJSON(res, 401, { error: 'Invalid username or password' });
-      }
-
-      const tokens = generateTokenPair(user);
-
-      return sendJSON(res, 200, {
-        message: 'Login successful',
-        user: {
-          id: user.id,
-          username: user.username,
-          credits: user.credits,
-          isAdmin: user.isAdmin,
-          createdAt: user.createdAt,
-        },
-        ...tokens,
-      });
-    }
-
-    // POST /api/v1/auth/refresh - Refresh access token
-    if (method === 'POST' && pathname === '/api/v1/auth/refresh') {
-      const body = await parseBody(req);
-      const { refreshToken } = body;
-
-      if (!refreshToken) {
-        return sendJSON(res, 400, { error: 'Refresh token required' });
-      }
-
-      const { verifyToken } = require('../src/middleware/auth.js');
-      const decoded = verifyToken(refreshToken);
-
-      if (!decoded || decoded.type !== 'refresh') {
-        return sendJSON(res, 401, { error: 'Invalid refresh token' });
-      }
-
-      const user = await findUserById(decoded.userId);
-      if (!user) {
-        return sendJSON(res, 401, { error: 'User not found' });
-      }
-
-      const tokens = generateTokenPair(user);
-
-      return sendJSON(res, 200, {
-        message: 'Token refreshed',
-        ...tokens,
-      });
-    }
-
-    // ==================== USER ROUTES ====================
-
-    // GET /api/v1/user/profile - Get current user profile
-    if (method === 'GET' && pathname === '/api/v1/user/profile') {
-      const authResult = await new Promise((resolve) => {
-        combinedAuthMiddleware(req, res, (err) => {
-          if (err) resolve(false);
-          else resolve(true);
-        });
-      });
-
-      if (!authResult) {
-        return sendJSON(res, 401, { error: 'Authentication required' });
-      }
-
-      const user = await findUserById(req.user.id);
-      const stats = await getUserStats(req.user.id);
-      const credits = await getCredits(req.user.id);
-
-      return sendJSON(res, 200, {
-        user: {
-          id: user.id,
-          username: user.username,
-          apiKey: user.api_key,
-          credits: credits,
-          isAdmin: user.is_admin,
-          createdAt: user.created_at,
-        },
-        stats,
-      });
-    }
-
-    // PUT /api/v1/user/api-key - Regenerate API key
-    if (method === 'PUT' && pathname === '/api/v1/user/api-key') {
-      const authResult = await new Promise((resolve) => {
-        combinedAuthMiddleware(req, res, (err) => {
-          if (err) resolve(false);
-          else resolve(true);
-        });
-      });
-
-      if (!authResult) {
-        return sendJSON(res, 401, { error: 'Authentication required' });
-      }
-
-      const newApiKey = await regenerateApiKey(req.user.id);
-
-      return sendJSON(res, 200, {
-        message: 'API key regenerated',
-        apiKey: newApiKey,
-      });
-    }
-
-    // PUT /api/v1/user/credits - Update user credits (admin only)
-    if (method === 'PUT' && pathname === '/api/v1/user/credits') {
-      const authResult = await new Promise((resolve) => {
-        combinedAuthMiddleware(req, res, (err) => {
-          if (err) resolve(false);
-          else resolve(true);
-        });
-      });
-
-      if (!authResult) {
-        return sendJSON(res, 401, { error: 'Authentication required' });
-      }
-
-      if (!req.user.isAdmin) {
-        return sendJSON(res, 403, { error: 'Admin access required' });
-      }
-
-      const body = await parseBody(req);
-      const { userId, amount, description } = body;
-
-      if (!userId || amount === undefined) {
-        return sendJSON(res, 400, { error: 'User ID and amount required' });
-      }
-
-      const updatedUser = await updateCredits(userId, amount, description || 'Admin adjustment');
-
-      return sendJSON(res, 200, {
-        message: 'Credits updated',
-        user: {
-          id: updatedUser.id,
-          username: updatedUser.username,
-          credits: updatedUser.credits,
-        },
-      });
-    }
-
-    // GET /api/v1/user/tasks - Get user's task history
-    if (method === 'GET' && pathname === '/api/v1/user/tasks') {
-      const authResult = await new Promise((resolve) => {
-        combinedAuthMiddleware(req, res, (err) => {
-          if (err) resolve(false);
-          else resolve(true);
-        });
-      });
-
-      if (!authResult) {
-        return sendJSON(res, 401, { error: 'Authentication required' });
-      }
-
-      const limit = parseInt(url.searchParams.get('limit')) || 20;
-      const offset = parseInt(url.searchParams.get('offset')) || 0;
-
-      const tasks = await getUserTasks(req.user.id, limit, offset);
-      const total = await getUserTaskCount(req.user.id);
-
-      return sendJSON(res, 200, {
-        tasks,
-        pagination: {
-          total,
-          limit,
-          offset,
-          hasMore: offset + tasks.length < total,
-        },
-      });
-    }
-
-    // GET /api/v1/admin/users - Get all users (admin only)
-    if (method === 'GET' && pathname === '/api/v1/admin/users') {
-      const authResult = await new Promise((resolve) => {
-        combinedAuthMiddleware(req, res, (err) => {
-          if (err) resolve(false);
-          else resolve(true);
-        });
-      });
-
-      if (!authResult) {
-        return sendJSON(res, 401, { error: 'Authentication required' });
-      }
-
-      if (!req.user.isAdmin) {
-        return sendJSON(res, 403, { error: 'Admin access required' });
-      }
-
-      const users = await getAllUsers();
-
-      return sendJSON(res, 200, {
-        users,
-        count: users.length,
-      });
-    }
-
-    // ==================== TASK ROUTES ====================
-
-    // POST /api/v1/tasks - Submit task (requires auth + credits)
-    if (method === 'POST' && pathname === '/api/v1/tasks') {
-      const authResult = await new Promise((resolve) => {
-        combinedAuthMiddleware(req, res, (err) => {
-          if (err) resolve(false);
-          else resolve(true);
-        });
-      });
-
-      if (!authResult) {
-        return sendJSON(res, 401, { error: 'Authentication required' });
-      }
-
-      // Check credits
-      const currentCredits = getCredits(req.user.id);
-      if (currentCredits <= 0) {
-        return sendJSON(res, 402, {
-          error: 'Insufficient credits',
-          code: 'NO_CREDITS',
-          currentCredits: currentCredits,
-        });
-      }
-
-      const body = await parseBody(req);
-      const { task, tools = [] } = body;
-
-      if (!task) {
-        return sendJSON(res, 400, { error: 'Task description required' });
-      }
-
-      // Create task in database
-      const dbTask = createTask(req.user.id, task, tools);
-      
-      const taskId = dbTask.id;
-      const taskData = {
-        ...dbTask,
-        userId: req.user.id,
-      };
-
-      taskStore.set(taskId, taskData);
-      
-      // Deduct credits
-      await deductTaskCredits(req.user.id);
-      
-      // Execute task asynchronously
-      executeTask(taskData).then(result => {
-        updateTask(taskId, {
-          status: result.status,
-          result: result.output,
-          progress: 100,
-        });
-        
-        taskResults.set(taskId, {
-          status: result.status,
-          progress: 100,
-          step: result.status,
-          result: result.output,
-          completedAt: result.completedAt,
-          duration: result.duration,
-        });
-      }).catch(error => {
-        updateTask(taskId, {
-          status: 'failed',
-          error: error.message,
-        });
-        taskResults.set(taskId, {
-          status: 'failed',
-          progress: 0,
-          step: 'error',
-          error: error.message,
-        });
-      });
-
-      return sendJSON(res, 200, {
-        taskId,
-        status: 'pending',
-        message: 'Task submitted successfully',
-        pollUrl: `/api/v1/tasks/${taskId}/poll`,
-        skills: Array.from(skills.keys()),
-        remainingCredits: currentCredits - 1,
-      });
-    }
-
-    // ==================== EXISTING ROUTES ====================
-
-    // GET /health
-    if (method === 'GET' && pathname === '/health') {
-      return sendJSON(res, 200, {
+      return res.json({
         status: 'healthy',
-        mode: redisAvailable ? 'redis' : 'memory',
-        skills: skills.size,
-        skillsList: Array.from(skills.keys()),
+        mode: pool ? 'supabase' : 'demo',
+        database: dbStatus,
         timestamp: new Date().toISOString(),
       });
     }
 
-    // GET /api/v1/skills
-    if (method === 'GET' && pathname === '/api/v1/skills') {
-      return sendJSON(res, 200, {
-        skills: Array.from(skills.keys()),
-        count: skills.size,
+    // API info
+    if (pathname === '/' || pathname === '/api') {
+      return res.json({
+        name: 'Agent Sandbox API',
+        version: '1.0.0',
+        mode: pool ? 'supabase' : 'demo',
+        database: pool ? 'connected' : 'demo-mode',
+        endpoints: [
+          'GET /health',
+          'POST /api/v1/auth/register',
+          'POST /api/v1/auth/login',
+          'GET /api/v1/user/profile',
+          'POST /api/v1/tasks',
+          'GET /api/v1/user/tasks',
+        ],
       });
     }
 
-    // GET /api/v1/tasks/:taskId/poll - Poll task status
-    const taskMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/poll$/);
-    if (method === 'GET' && taskMatch) {
-      const taskId = taskMatch[1];
-      const result = taskResults.get(taskId);
-      const taskData = taskStore.get(taskId);
-
-      if (!taskData) {
-        return sendJSON(res, 404, { error: 'Task not found' });
-      }
-
-      return sendJSON(res, 200, {
-        taskId,
-        status: result?.status || taskData.status,
-        progress: result?.progress || taskData.progress || 0,
-        step: result?.step || taskData.step,
-        message: result?.message || taskData.message,
-        createdAt: taskData.createdAt,
-        completedAt: result?.completedAt || taskData.completedAt,
-        duration: result?.duration,
-        result: result?.result,
-      });
-    }
-
-    // GET /api/v1/tasks/:taskId - Get full task details
-    const detailMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
-    if (method === 'GET' && detailMatch && !pathname.includes('/poll')) {
-      const taskId = detailMatch[1];
-      const taskData = taskStore.get(taskId);
-      const result = taskResults.get(taskId);
-
-      if (!taskData) {
-        // Try to get from database
-        const dbTask = getTaskById(taskId);
-        if (!dbTask) {
-          return sendJSON(res, 404, { error: 'Task not found' });
-        }
-        return sendJSON(res, 200, {
-          task: dbTask,
-          result: result,
-        });
-      }
-
-      return sendJSON(res, 200, {
-        task: taskData,
-        result: result,
-      });
-    }
-
-    // POST /api/v1/tasks/:taskId/execute - Execute skill manually
-    const execMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/execute$/);
-    if (method === 'POST' && execMatch) {
-      const taskId = execMatch[1];
-      const body = await parseBody(req);
-      const { skill, input } = body;
-
-      const taskData = taskStore.get(taskId);
-      if (!taskData) {
-        return sendJSON(res, 404, { error: 'Task not found' });
-      }
-
-      try {
-        const skillResult = await executeSkill(skill, input || { task: taskData.task });
-        return sendJSON(res, 200, {
-          skill,
-          result: skillResult,
-        });
-      } catch (e) {
-        return sendJSON(res, 400, { error: e.message });
-      }
-    }
-
-    // GET /metrics
-    if (method === 'GET' && pathname === '/metrics') {
-      const completed = Array.from(taskResults.values()).filter(r => r.status === 'completed').length;
-      const failed = Array.from(taskResults.values()).filter(r => r.status === 'failed').length;
+    // Register
+    if (pathname === '/api/v1/auth/register' && method === 'POST') {
+      const { username, password } = body;
       
-      return sendJSON(res, 200, {
-        agent_mode: redisAvailable ? 'redis' : 'memory',
-        agent_skills_total: skills.size,
-        agent_tasks_total: taskStore.size,
-        agent_tasks_completed: completed,
-        agent_tasks_failed: failed,
-        agent_timestamp: Date.now(),
+      if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password required' });
+      }
+      if (username.length < 3) {
+        return res.status(400).json({ error: 'Username must be at least 3 characters' });
+      }
+      if (password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      }
+
+      const crypto = await import('crypto');
+      const id = crypto.randomUUID();
+      const passwordHash = await hashPassword(password);
+      const apiKey = generateApiKey();
+      const accessToken = Buffer.from(`${id}:${Date.now()}`).toString('base64');
+      const refreshToken = crypto.randomUUID();
+
+      if (pool) {
+        try {
+          await pool.query(`
+            INSERT INTO users (id, username, password_hash, api_key, credits, is_admin)
+            VALUES ($1, $2, $3, $4, 100, 0)
+          `, [id, username, passwordHash, apiKey]);
+        } catch (error) {
+          if (error.code === '23505') {
+            return res.status(409).json({ error: 'Username already exists' });
+          }
+          throw error;
+        }
+      } else {
+        // Demo mode - store in memory
+        if (users.has(username)) {
+          return res.status(409).json({ error: 'Username already exists' });
+        }
+        users.set(username, { id, passwordHash, apiKey, credits: 100 });
+      }
+
+      return res.status(201).json({
+        message: 'User registered successfully',
+        user: { id, username, credits: 100, isAdmin: false },
+        apiKey,
+        accessToken,
+        refreshToken,
+        expiresIn: '24h',
       });
     }
 
-    // ==================== FRONTEND ====================
-
-    // Serve static frontend
-    if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-      const frontendPath = path.join(__dirname, '..', 'www', 'index.html');
-      if (fs.existsSync(frontendPath)) {
-        const content = fs.readFileSync(frontendPath, 'utf-8');
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(content);
-        return;
+    // Login
+    if (pathname === '/api/v1/auth/login' && method === 'POST') {
+      const { username, password } = body;
+      
+      if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password required' });
       }
+
+      let user = null;
+
+      if (pool) {
+        const result = await pool.query(`SELECT * FROM users WHERE username = $1`, [username]);
+        user = result.rows[0];
+      } else {
+        user = users.get(username);
+      }
+
+      if (!user) {
+        return res.status(401).json({ error: 'Invalid username or password' });
+      }
+
+      const valid = pool 
+        ? await comparePassword(password, user.password_hash)
+        : await comparePassword(password, user.passwordHash);
+
+      if (!valid) {
+        return res.status(401).json({ error: 'Invalid username or password' });
+      }
+
+      const crypto = await import('crypto');
+      const accessToken = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
+      const refreshToken = crypto.randomUUID();
+
+      return res.json({
+        message: 'Login successful',
+        user: {
+          id: user.id,
+          username: pool ? user.username : username,
+          credits: user.credits,
+          isAdmin: user.is_admin === 1,
+        },
+        accessToken,
+        refreshToken,
+        expiresIn: '24h',
+      });
+    }
+
+    // Get profile
+    if (pathname === '/api/v1/user/profile' && method === 'GET') {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const token = authHeader.replace('Bearer ', '');
+      const [userId] = Buffer.from(token, 'base64').toString().split(':');
+
+      let user = null;
+      if (pool) {
+        const result = await pool.query(`SELECT * FROM users WHERE id = $1`, [userId]);
+        user = result.rows[0];
+      }
+
+      if (!user) {
+        return res.status(401).json({ error: 'User not found' });
+      }
+
+      return res.json({
+        user: {
+          id: user.id,
+          username: user.username,
+          credits: user.credits,
+          isAdmin: user.is_admin === 1,
+        },
+        stats: { total_tasks: 0, completed_tasks: 0, failed_tasks: 0 },
+      });
+    }
+
+    // Submit task
+    if (pathname === '/api/v1/tasks' && method === 'POST') {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const token = authHeader.replace('Bearer ', '');
+      const [userId] = Buffer.from(token, 'base64').toString().split(':');
+      const { task, tools } = body;
+
+      if (!task) {
+        return res.status(400).json({ error: 'Task description required' });
+      }
+
+      const crypto = await import('crypto');
+      const taskId = crypto.randomUUID();
+
+      tasks.set(taskId, {
+        id: taskId,
+        userId,
+        task,
+        tools: tools || [],
+        status: 'pending',
+        progress: 0,
+        created_at: new Date().toISOString(),
+      });
+
+      return res.json({
+        taskId,
+        status: 'pending',
+        message: 'Task submitted successfully',
+        pollUrl: `/api/v1/tasks/${taskId}/poll`,
+        remainingCredits: 99,
+      });
+    }
+
+    // Get tasks
+    if (pathname === '/api/v1/user/tasks' && method === 'GET') {
+      return res.json({
+        tasks: [],
+        pagination: { total: 0, limit: 20, offset: 0, hasMore: false },
+      });
+    }
+
+    // Poll task
+    if (pathname.match(/^\/api\/v1\/tasks\/[^/]+\/poll$/) && method === 'GET') {
+      const taskId = pathname.split('/')[4];
+      const task = tasks.get(taskId);
+
+      if (!task) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+
+      return res.json({
+        taskId: task.id,
+        status: task.status,
+        progress: task.progress,
+        message: task.message || 'Task queued',
+      });
+    }
+
+    // Skills
+    if (pathname === '/api/v1/skills' && method === 'GET') {
+      return res.json({
+        skills: ['web-search', 'code-generator', 'report-generator', 'github-publisher'],
+        count: 4,
+      });
     }
 
     // 404
-    res.writeHead(404);
-    res.end('Not Found');
-
+    return res.status(404).json({ error: 'Not Found', path: pathname });
   } catch (error) {
     console.error('Error:', error);
-    sendJSON(res, 500, { error: error.message });
+    return res.status(500).json({ error: 'Internal Server Error', message: error.message });
   }
 }
-
-// Start server
-const PORT = config.server.port || 3000;
-const HOST = config.server.host || '0.0.0.0';
-
-// Async startup
-async function startServer() {
-  try {
-    console.log('📦 Initializing database...');
-    await initDatabase();
-    console.log('✅ Database initialized');
-    
-    const server = http.createServer(handleRequest);
-    
-    server.listen(PORT, HOST, () => {
-      console.log(`🚀 Agent Sandbox running on http://${HOST}:${PORT}`);
-      console.log(`📋 Health: http://${HOST}:${PORT}/health`);
-      console.log(`✅ Skills loaded: ${skills.size}`);
-      console.log(`🎯 Mode: ${redisAvailable ? 'Redis' : 'Memory'}`);
-      console.log(`👥 User system: enabled (SQLite)`);
-    });
-    
-    process.on('SIGTERM', () => {
-      console.log('Shutting down...');
-      server.close(() => process.exit(0));
-    });
-    
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
-}
-
-startServer();

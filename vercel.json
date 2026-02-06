@@ -3,15 +3,29 @@
   "framework": null,
   "buildCommand": "npm install",
   "installCommand": "npm install",
-  "devCommand": "npm start",
+  "devCommand": "node api/server.js",
   "outputDirectory": "src/www",
   "regions": ["iad1"],
   "functions": {
-    "api/index.js": {
+    "api/server.js": {
       "runtime": "nodejs22.x",
       "maxDuration": 30
     }
   },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/server.js"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/server.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/src/www/index.html"
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",
