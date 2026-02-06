@@ -14,15 +14,16 @@
     "logs": "docker-compose logs -f"
   },
   "dependencies": {
-    "openai": "^4.0.0",
     "@anthropic-ai/sdk": "^0.26.0",
+    "@vercel/postgres": "^0.10.0",
     "axios": "^1.6.0",
-    "octokit": "^3.0.0",
-    "ioredis": "^5.4.1",
-    "uuid": "^10.0.0",
-    "sql.js": "^1.10.3",
     "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2"
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "octokit": "^3.0.0",
+    "openai": "^4.0.0",
+    "sql.js": "^1.10.3",
+    "uuid": "^10.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

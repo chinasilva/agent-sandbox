@@ -1,10 +1,9 @@
 /**
- * User Database Layer
- * Using sql.js (pure JavaScript SQLite implementation)
- * No native compilation required!
+ * User Database Layer - Vercel Postgres Version
+ * Supports both local SQLite and Vercel Postgres
  */
 
-import initSqlJs from 'sql.js';
+import { sql, createPool } from '@vercel/postgres';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
@@ -12,125 +11,78 @@ import bcrypt from 'bcryptjs';
 import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = process.env.DB_PATH || path.join(__dirname, '..', '..', 'data', 'users.db');
 
-// Ensure data directory exists
-const dataDir = path.dirname(dbPath);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
+// Check if we're on Vercel
+const isVercel = process.env.VERCEL === '1' || process.env.DATABASE_URL;
 
-let db = null;
+// Database initialization
+let initialized = false;
 
 /**
- * Initialize database
+ * Initialize database tables
  */
 export async function initDatabase() {
-  if (db) return db;
+  if (initialized) return;
   
-  const SQL = await initSqlJs();
-  
-  // Try to load existing database
   try {
-    if (fs.existsSync(dbPath)) {
-      const fileBuffer = fs.readFileSync(dbPath);
-      db = new SQL.Database(fileBuffer);
-      console.log('✅ Database loaded from file');
-    } else {
-      db = new SQL.Database();
-      console.log('✅ New database created');
+    // Create users table
+    await sql`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        api_key TEXT UNIQUE NOT NULL,
+        credits INTEGER DEFAULT 100,
+        is_admin INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+    
+    // Create tasks table
+    await sql`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        tools TEXT,
+        status TEXT DEFAULT 'pending',
+        progress INTEGER DEFAULT 0,
+        step TEXT,
+        message TEXT,
+        result TEXT,
+        credits_used INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+    
+    // Create credit_transactions table
+    await sql`
+      CREATE TABLE IF NOT EXISTS credit_transactions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        description TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+    
+    // Create indexes
+    try {
+      await sql`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`;
+    } catch (e) {
+      // Indexes might already exist
     }
-  } catch (e) {
-    db = new SQL.Database();
-    console.log('✅ Fresh database created');
+    
+    initialized = true;
+    console.log('✅ Vercel Postgres database initialized');
+  } catch (error) {
+    console.error('❌ Database initialization failed:', error.message);
+    throw error;
   }
-  
-  // Initialize tables
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      api_key TEXT UNIQUE NOT NULL,
-      credits INTEGER DEFAULT 100,
-      is_admin INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS tasks (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      task TEXT NOT NULL,
-      tools TEXT,
-      status TEXT DEFAULT 'pending',
-      progress INTEGER DEFAULT 0,
-      step TEXT,
-      message TEXT,
-      result TEXT,
-      credits_used INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS credit_transactions (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      amount INTEGER NOT NULL,
-      type TEXT NOT NULL,
-      description TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  // Create indexes
-  try {
-    db.run('CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)');
-    db.run('CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)');
-  } catch (e) {
-    // Indexes might already exist
-  }
-  
-  saveDatabase();
-  return db;
-}
-
-/**
- * Save database to file
- */
-function saveDatabase() {
-  if (db) {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    fs.writeFileSync(dbPath, buffer);
-  }
-}
-
-/**
- * Execute query and return results
- */
-function query(sql, params = []) {
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  
-  const results = [];
-  while (stmt.step()) {
-    results.push(stmt.getAsObject());
-  }
-  stmt.free();
-  return results;
-}
-
-/**
- * Execute without returning results
- */
-function run(sql, params = []) {
-  db.run(sql, params);
-  saveDatabase();
 }
 
 /**
@@ -151,21 +103,23 @@ export async function createUser(username, password) {
   const apiKey = generateApiKey();
   
   try {
-    run(
-      `INSERT INTO users (id, username, password_hash, api_key, credits, is_admin) VALUES (?, ?, ?, ?, ?, ?)`,
-      [id, username, passwordHash, apiKey, 100, 0]
-    );
+    const result = await sql`
+      INSERT INTO users (id, username, password_hash, api_key, credits, is_admin)
+      VALUES (${id}, ${username}, ${passwordHash}, ${apiKey}, 100, 0)
+      RETURNING id, username, api_key, credits, is_admin, created_at
+    `;
     
+    const user = result.rows[0];
     return {
-      id,
-      username,
-      apiKey,
-      credits: 100,
-      isAdmin: false,
-      createdAt: new Date().toISOString(),
+      id: user.id,
+      username: user.username,
+      apiKey: user.api_key,
+      credits: user.credits,
+      isAdmin: user.is_admin === 1,
+      createdAt: user.created_at,
     };
   } catch (error) {
-    if (error.message.includes('UNIQUE constraint failed')) {
+    if (error.message?.includes('duplicate key')) {
       throw new Error('Username already exists');
     }
     throw error;
@@ -177,8 +131,8 @@ export async function createUser(username, password) {
  */
 export async function findUserByUsername(username) {
   await initDatabase();
-  const results = query('SELECT * FROM users WHERE username = ?', [username]);
-  return results[0] || null;
+  const result = await sql`SELECT * FROM users WHERE username = ${username}`;
+  return result.rows[0] || null;
 }
 
 /**
@@ -186,8 +140,11 @@ export async function findUserByUsername(username) {
  */
 export async function findUserById(id) {
   await initDatabase();
-  const results = query('SELECT id, username, api_key, credits, is_admin, created_at, updated_at FROM users WHERE id = ?', [id]);
-  return results[0] || null;
+  const result = await sql`
+    SELECT id, username, api_key, credits, is_admin, created_at, updated_at 
+    FROM users WHERE id = ${id}
+  `;
+  return result.rows[0] || null;
 }
 
 /**
@@ -195,8 +152,8 @@ export async function findUserById(id) {
  */
 export async function findUserByApiKey(apiKey) {
   await initDatabase();
-  const results = query('SELECT * FROM users WHERE api_key = ?', [apiKey]);
-  return results[0] || null;
+  const result = await sql`SELECT * FROM users WHERE api_key = ${apiKey}`;
+  return result.rows[0] || null;
 }
 
 /**
@@ -219,7 +176,10 @@ export async function validatePassword(username, password) {
 export async function regenerateApiKey(userId) {
   await initDatabase();
   const newApiKey = generateApiKey();
-  run('UPDATE users SET api_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [newApiKey, userId]);
+  await sql`
+    UPDATE users SET api_key = ${newApiKey}, updated_at = CURRENT_TIMESTAMP 
+    WHERE id = ${userId}
+  `;
   return newApiKey;
 }
 
@@ -230,14 +190,20 @@ export async function updateCredits(userId, amount, description = '') {
   await initDatabase();
   const transactionId = uuidv4();
   
-  run(
-    `INSERT INTO credit_transactions (id, user_id, amount, type, description) VALUES (?, ?, ?, ?, ?)`,
-    [transactionId, userId, amount, amount > 0 ? 'credit' : 'debit', description]
-  );
+  // Add transaction record
+  await sql`
+    INSERT INTO credit_transactions (id, user_id, amount, type, description)
+    VALUES (${transactionId}, ${userId}, ${amount}, ${amount > 0 ? 'credit' : 'debit'}, ${description})
+  `;
   
-  run('UPDATE users SET credits = credits + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [amount, userId]);
+  // Update user credits
+  const result = await sql`
+    UPDATE users SET credits = credits + ${amount}, updated_at = CURRENT_TIMESTAMP 
+    WHERE id = ${userId}
+    RETURNING id, username, credits
+  `;
   
-  return await findUserById(userId);
+  return result.rows[0];
 }
 
 /**
@@ -262,8 +228,8 @@ export async function deductTaskCredits(userId) {
  */
 export async function getCredits(userId) {
   await initDatabase();
-  const results = query('SELECT credits FROM users WHERE id = ?', [userId]);
-  return results[0]?.credits || 0;
+  const result = await sql`SELECT credits FROM users WHERE id = ${userId}`;
+  return result.rows[0]?.credits || 0;
 }
 
 /**
@@ -271,12 +237,14 @@ export async function getCredits(userId) {
  */
 export async function getUserTasks(userId, limit = 20, offset = 0) {
   await initDatabase();
-  const results = query(
-    `SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    [userId, limit, offset]
-  );
+  const result = await sql`
+    SELECT * FROM tasks 
+    WHERE user_id = ${userId}
+    ORDER BY created_at DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `;
   
-  return results.map(task => ({
+  return result.rows.map(task => ({
     ...task,
     tools: JSON.parse(task.tools || '[]'),
   }));
@@ -287,8 +255,8 @@ export async function getUserTasks(userId, limit = 20, offset = 0) {
  */
 export async function getUserTaskCount(userId) {
   await initDatabase();
-  const results = query('SELECT COUNT(*) as count FROM tasks WHERE user_id = ?', [userId]);
-  return results[0]?.count || 0;
+  const result = await sql`SELECT COUNT(*) as count FROM tasks WHERE user_id = ${userId}`;
+  return result.rows[0]?.count || 0;
 }
 
 /**
@@ -299,10 +267,10 @@ export async function createTask(userId, task, tools = []) {
   
   const id = uuidv4();
   
-  run(
-    `INSERT INTO tasks (id, user_id, task, tools, status, progress, step, message) VALUES (?, ?, ?, ?, 'pending', 0, 'queued', 'Task queued')`,
-    [id, userId, task, JSON.stringify(tools)]
-  );
+  await sql`
+    INSERT INTO tasks (id, user_id, task, tools, status, progress, step, message)
+    VALUES (${id}, ${userId}, ${task}, ${JSON.stringify(tools)}, 'pending', 0, 'queued', 'Task queued')
+  `;
   
   return {
     id,
@@ -327,7 +295,7 @@ export async function updateTask(taskId, updates) {
   
   for (const [key, value] of Object.entries(updates)) {
     if (allowedFields.includes(key)) {
-      setClause.push(`${key} = ?`);
+      setClause.push(`${key} = ${key === 'tools' ? '$' + (values.length + 1) : '$' + (values.length + 1)}`);
       values.push(key === 'tools' ? JSON.stringify(value) : value);
     }
   }
@@ -337,7 +305,9 @@ export async function updateTask(taskId, updates) {
   setClause.push("updated_at = CURRENT_TIMESTAMP");
   values.push(taskId);
   
-  run(`UPDATE tasks SET ${setClause.join(', ')} WHERE id = ?`, values);
+  await sql`
+    UPDATE tasks SET ${setClause.join(', ')} WHERE id = $${values.length}
+  `;
 }
 
 /**
@@ -345,11 +315,11 @@ export async function updateTask(taskId, updates) {
  */
 export async function getTaskById(taskId) {
   await initDatabase();
-  const results = query('SELECT * FROM tasks WHERE id = ?', [taskId]);
-  if (results[0]) {
-    results[0].tools = JSON.parse(results[0].tools || '[]');
+  const result = await sql`SELECT * FROM tasks WHERE id = ${taskId}`;
+  if (result.rows[0]) {
+    result.rows[0].tools = JSON.parse(result.rows[0].tools || '[]');
   }
-  return results[0] || null;
+  return result.rows[0] || null;
 }
 
 /**
@@ -357,7 +327,11 @@ export async function getTaskById(taskId) {
  */
 export async function getAllUsers() {
   await initDatabase();
-  return query('SELECT id, username, credits, is_admin, created_at FROM users ORDER BY created_at DESC');
+  const result = await sql`
+    SELECT id, username, credits, is_admin, created_at 
+    FROM users ORDER BY created_at DESC
+  `;
+  return result.rows;
 }
 
 /**
@@ -365,8 +339,8 @@ export async function getAllUsers() {
  */
 export async function usernameExists(username) {
   await initDatabase();
-  const results = query('SELECT 1 FROM users WHERE username = ?', [username]);
-  return results.length > 0;
+  const result = await sql`SELECT 1 FROM users WHERE username = ${username}`;
+  return result.rows.length > 0;
 }
 
 /**
@@ -374,17 +348,16 @@ export async function usernameExists(username) {
  */
 export async function getUserStats(userId) {
   await initDatabase();
-  const results = query(`
+  const result = await sql`
     SELECT 
       COUNT(*) as total_tasks,
       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_tasks,
       SUM(credits_used) as total_credits_used
-    FROM tasks
-    WHERE user_id = ?
-  `, [userId]);
+    FROM tasks WHERE user_id = ${userId}
+  `;
   
-  const stats = results[0] || {};
+  const stats = result.rows[0] || {};
   return {
     total_tasks: stats.total_tasks || 0,
     completed_tasks: stats.completed_tasks || 0,
