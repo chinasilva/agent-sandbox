@@ -1,19 +1,10 @@
 {
   "version": 2,
+  "framework": null,
   "builds": [
     {
-      "src": "index.js",
+      "src": "api/index.js",
       "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "/index.js"
-    },
-    {
-      "src": "/health",
-      "dest": "/index.js"
     }
   ]
 }
