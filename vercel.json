@@ -1,12 +1,15 @@
 {
-  "version": 2,
-  "buildCommand": "npm install --no-optional",
-  "installCommand": "npm install --no-optional",
   "framework": null,
+  "buildCommand": "npm install --no-optional",
   "outputDirectory": "src/www",
+  "functions": {
+    "api/server.js": {
+      "runtime": "nodejs22.x"
+    }
+  },
   "rewrites": [
     {
-      "source": "/api/:path*",
+      "source": "/api/(.*)",
       "destination": "/api/server.js"
     },
     {
