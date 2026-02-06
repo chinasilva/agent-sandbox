@@ -30,6 +30,7 @@ temp/
 workspace/
 *.json
 !package.json
+!vercel.json
 
 # Docker
 .docker/
