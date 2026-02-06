@@ -2,7 +2,5 @@
   "version": 2,
   "buildCommand": "npm install --no-optional",
   "installCommand": "npm install --no-optional",
-  "framework": null,
-  "outputDirectory": "src/www",
-  "cleanUrls": true
+  "framework": null
 }
