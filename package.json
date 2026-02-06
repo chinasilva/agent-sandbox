@@ -2,5 +2,8 @@
   "name": "agent-sandbox",
   "version": "1.0.0",
   "type": "module",
-  "main": "api/index.js"
+  "main": "api/index.js",
+  "dependencies": {
+    "bcryptjs": "^2.4.3"
+  }
 }
