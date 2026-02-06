@@ -1,27 +1,15 @@
 {
-  "version": 2,
-  "builds": [
+  "framework": null,
+  "buildCommand": "npm install --no-optional",
+  "outputDirectory": "src/www",
+  "rewrites": [
     {
-      "src": "api/index.js",
-      "use": "@vercel/node"
+      "source": "/api/:match*",
+      "destination": "/api/index.js"
     },
     {
-      "src": "src/www/**",
-      "use": "@vercel/static"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "/api/index.js"
-    },
-    {
-      "src": "/health",
-      "dest": "/api/index.js"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/src/www/index.html"
+      "source": "/health",
+      "destination": "/api/index.js"
     }
   ]
 }
