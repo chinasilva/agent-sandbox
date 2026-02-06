@@ -1,15 +1,4 @@
 {
   "framework": null,
-  "buildCommand": "npm install --no-optional",
-  "outputDirectory": "src/www",
-  "rewrites": [
-    {
-      "source": "/api/:match*",
-      "destination": "/api/index.js"
-    },
-    {
-      "source": "/health",
-      "destination": "/api/index.js"
-    }
-  ]
+  "buildCommand": "npm install --no-optional"
 }
