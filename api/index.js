@@ -1,17 +1,29 @@
 /**
- * Vercel Serverless API - Full Version with Database Support
- * Uses @vercel/postgres for user management
+ * Vercel Serverless API - Supabase/PostgreSQL Version
+ * Supports Supabase or any PostgreSQL database
  */
 
-import { sql } from '@vercel/postgres';
+import pg from 'pg';
+const { Pool } = pg;
 
-// Initialize database on cold start
-let dbInitialized = false;
-async function ensureDbInit() {
-  if (dbInitialized) return;
+// Create connection pool - reads from DATABASE_URL environment variable
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || process.env.SUPABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+
+// Initialize database tables
+let initialized = false;
+
+/**
+ * Initialize database tables
+ */
+async function initDatabase() {
+  if (initialized) return;
+  
   try {
-    // Create tables if not exist
-    await sql`
+    // Create users table
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
@@ -19,14 +31,62 @@ async function ensureDbInit() {
         api_key TEXT UNIQUE NOT NULL,
         credits INTEGER DEFAULT 100,
         is_admin INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
-    `;
-    dbInitialized = true;
-  } catch (e) {
-    console.error('DB init error:', e.message);
+    `);
+    
+    // Create tasks table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        tools TEXT,
+        status TEXT DEFAULT 'pending',
+        progress INTEGER DEFAULT 0,
+        step TEXT,
+        message TEXT,
+        result TEXT,
+        credits_used INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create credit_transactions table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS credit_transactions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        description TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create indexes
+    try {
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`);
+    } catch (e) {
+      // Indexes might already exist
+    }
+    
+    initialized = true;
+    console.log('✅ Supabase/PostgreSQL database initialized');
+  } catch (error) {
+    console.error('❌ Database initialization failed:', error.message);
+    throw error;
   }
+}
+
+/**
+ * Generate a new API key
+ */
+function generateApiKey() {
+  return `ask_${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
 export default async function handler(req, res) {
@@ -42,15 +102,17 @@ export default async function handler(req, res) {
   const url = new URL(req.url || '/', `https://${req.headers.host}`);
   const pathname = url.pathname;
   const method = req.method;
+  const body = req.body;
 
   try {
     // Health check
     if (pathname === '/health' && method === 'GET') {
       return res.json({
         status: 'healthy',
-        mode: 'vercel-postgres',
+        mode: 'supabase-postgres',
         skills: ['web-search', 'code-generator', 'report-generator', 'github-publisher'],
         skillsList: ['web-search', 'code-generator', 'report-generator', 'github-publisher'],
+        database: process.env.DATABASE_URL ? 'connected' : 'not configured',
         timestamp: new Date().toISOString(),
       });
     }
@@ -65,8 +127,8 @@ export default async function handler(req, res) {
 
     // Register user
     if (pathname === '/api/v1/auth/register' && method === 'POST') {
-      await ensureDbInit();
-      const { username, password } = req.body || {};
+      await initDatabase();
+      const { username, password } = body || {};
       
       if (!username || !password) {
         return res.status(400).json({ error: 'Username and password required' });
@@ -80,7 +142,7 @@ export default async function handler(req, res) {
 
       try {
         // Check if username exists
-        const existing = await sql`SELECT 1 FROM users WHERE username = ${username}`;
+        const existing = await pool.query(`SELECT 1 FROM users WHERE username = $1`, [username]);
         if (existing.rows.length > 0) {
           return res.status(409).json({ error: 'Username already exists' });
         }
@@ -90,12 +152,12 @@ export default async function handler(req, res) {
         const crypto = await import('crypto');
         const id = crypto.randomUUID();
         const passwordHash = await bcrypt.hash(password, 10);
-        const apiKey = `ask_${crypto.randomUUID().replace(/-/g, '')}`;
+        const apiKey = generateApiKey();
 
-        await sql`
+        await pool.query(`
           INSERT INTO users (id, username, password_hash, api_key, credits, is_admin)
-          VALUES (${id}, ${username}, ${passwordHash}, ${apiKey}, 100, 0)
-        `;
+          VALUES ($1, $2, $3, $4, 100, 0)
+        `, [id, username, passwordHash, apiKey]);
 
         return res.status(201).json({
           message: 'User registered successfully',
@@ -109,7 +171,7 @@ export default async function handler(req, res) {
           apiKey,
         });
       } catch (error) {
-        if (error.message?.includes('duplicate key')) {
+        if (error.code === '23505') { // PostgreSQL unique violation
           return res.status(409).json({ error: 'Username already exists' });
         }
         throw error;
@@ -118,15 +180,15 @@ export default async function handler(req, res) {
 
     // Login user
     if (pathname === '/api/v1/auth/login' && method === 'POST') {
-      await ensureDbInit();
-      const { username, password } = req.body || {};
+      await initDatabase();
+      const { username, password } = body || {};
       
       if (!username || !password) {
         return res.status(400).json({ error: 'Username and password required' });
       }
 
       try {
-        const result = await sql`SELECT * FROM users WHERE username = ${username}`;
+        const result = await pool.query(`SELECT * FROM users WHERE username = $1`, [username]);
         const user = result.rows[0];
         
         if (!user) {
@@ -140,7 +202,7 @@ export default async function handler(req, res) {
           return res.status(401).json({ error: 'Invalid username or password' });
         }
 
-        // Generate simple token (for demo purposes)
+        // Generate token
         const crypto = await import('crypto');
         const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
 
@@ -150,7 +212,7 @@ export default async function handler(req, res) {
             id: user.id,
             username: user.username,
             credits: user.credits,
-            isAdmin: user.is_admin === 1,
+            isAdmin: user.is_admin === 1 || user.is_admin === true,
             createdAt: user.created_at,
           },
           accessToken: token,
@@ -163,7 +225,7 @@ export default async function handler(req, res) {
 
     // Get user profile
     if (pathname === '/api/v1/user/profile' && method === 'GET') {
-      await ensureDbInit();
+      await initDatabase();
       const authHeader = req.headers.authorization;
       
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -174,9 +236,9 @@ export default async function handler(req, res) {
         const token = authHeader.replace('Bearer ', '');
         const [userId] = Buffer.from(token, 'base64').toString().split(':');
         
-        const result = await sql`
-          SELECT id, username, api_key, credits, is_admin, created_at FROM users WHERE id = ${userId}
-        `;
+        const result = await pool.query(`
+          SELECT id, username, api_key, credits, is_admin, created_at FROM users WHERE id = $1
+        `, [userId]);
         
         if (!result.rows[0]) {
           return res.status(401).json({ error: 'User not found' });
@@ -185,13 +247,13 @@ export default async function handler(req, res) {
         const user = result.rows[0];
 
         // Get stats
-        const statsResult = await sql`
+        const statsResult = await pool.query(`
           SELECT 
             COUNT(*) as total_tasks,
             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_tasks
-          FROM tasks WHERE user_id = ${userId}
-        `;
+          FROM tasks WHERE user_id = $1
+        `, [userId]);
         const stats = statsResult.rows[0];
 
         return res.json({
@@ -200,7 +262,7 @@ export default async function handler(req, res) {
             username: user.username,
             apiKey: user.api_key,
             credits: user.credits,
-            isAdmin: user.is_admin === 1,
+            isAdmin: user.is_admin === 1 || user.is_admin === true,
             createdAt: user.created_at,
           },
           stats: {
@@ -216,7 +278,7 @@ export default async function handler(req, res) {
 
     // Submit task
     if (pathname === '/api/v1/tasks' && method === 'POST') {
-      await ensureDbInit();
+      await initDatabase();
       const authHeader = req.headers.authorization;
       
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -227,14 +289,14 @@ export default async function handler(req, res) {
         const token = authHeader.replace('Bearer ', '');
         const [userId] = Buffer.from(token, 'base64').toString().split(':');
         
-        const { task, tools = [] } = req.body || {};
+        const { task, tools = [] } = body || {};
         
         if (!task) {
           return res.status(400).json({ error: 'Task description required' });
         }
 
         // Check credits
-        const creditResult = await sql`SELECT credits FROM users WHERE id = ${userId}`;
+        const creditResult = await pool.query(`SELECT credits FROM users WHERE id = $1`, [userId]);
         const credits = creditResult.rows[0]?.credits || 0;
         
         if (credits <= 0) {
@@ -245,13 +307,13 @@ export default async function handler(req, res) {
         const crypto = await import('crypto');
         const taskId = crypto.randomUUID();
         
-        await sql`
+        await pool.query(`
           INSERT INTO tasks (id, user_id, task, tools, status, progress, step, message, credits_used)
-          VALUES (${taskId}, ${userId}, ${task}, ${JSON.stringify(tools)}, 'pending', 0, 'queued', 'Task queued', 1)
-        `;
+          VALUES ($1, $2, $3, $4, 'pending', 0, 'queued', 'Task queued', 1)
+        `, [taskId, userId, task, JSON.stringify(tools)]);
 
         // Deduct credits
-        await sql`UPDATE users SET credits = credits - 1 WHERE id = ${userId}`;
+        await pool.query(`UPDATE users SET credits = credits - 1 WHERE id = $1`, [userId]);
 
         return res.json({
           taskId,
@@ -268,7 +330,7 @@ export default async function handler(req, res) {
 
     // Get task history
     if (pathname === '/api/v1/user/tasks' && method === 'GET') {
-      await ensureDbInit();
+      await initDatabase();
       const authHeader = req.headers.authorization;
       
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -282,13 +344,13 @@ export default async function handler(req, res) {
         const limit = parseInt(url.searchParams.get('limit')) || 20;
         const offset = parseInt(url.searchParams.get('offset')) || 0;
         
-        const result = await sql`
-          SELECT * FROM tasks WHERE user_id = ${userId}
+        const result = await pool.query(`
+          SELECT * FROM tasks WHERE user_id = $1
           ORDER BY created_at DESC
-          LIMIT ${limit} OFFSET ${offset}
-        `;
+          LIMIT $2 OFFSET $3
+        `, [userId, limit, offset]);
         
-        const countResult = await sql`SELECT COUNT(*) as count FROM tasks WHERE user_id = ${userId}`;
+        const countResult = await pool.query(`SELECT COUNT(*) as count FROM tasks WHERE user_id = $1`, [userId]);
         const total = parseInt(countResult.rows[0].count);
 
         return res.json({
@@ -310,10 +372,10 @@ export default async function handler(req, res) {
 
     // Poll task status
     if (pathname.match(/^\/api\/v1\/tasks\/[^/]+\/poll$/) && method === 'GET') {
-      await ensureDbInit();
+      await initDatabase();
       const taskId = pathname.split('/')[4];
       
-      const result = await sql`SELECT * FROM tasks WHERE id = ${taskId}`;
+      const result = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [taskId]);
       const task = result.rows[0];
       
       if (!task) {
@@ -334,7 +396,7 @@ export default async function handler(req, res) {
     // Metrics
     if (pathname === '/metrics' && method === 'GET') {
       return res.json({
-        agent_mode: 'vercel-postgres',
+        agent_mode: 'supabase-postgres',
         agent_skills_total: 4,
         agent_timestamp: Date.now(),
       });
@@ -345,8 +407,9 @@ export default async function handler(req, res) {
       return res.json({
         name: 'Agent Sandbox API',
         version: '1.0.0',
-        mode: 'vercel-postgres',
+        mode: 'supabase-postgres',
         description: 'AI-powered task execution platform with user system',
+        database: process.env.DATABASE_URL ? 'connected' : 'not configured',
         endpoints: {
           'GET /': 'API info',
           'GET /health': 'Health check',
@@ -370,6 +433,10 @@ export default async function handler(req, res) {
           creditsSystem: true,
           taskQueue: true,
         },
+        setup: {
+          database: 'Set DATABASE_URL environment variable with your Supabase connection string',
+          example: 'postgres://user:password@host:5432/database?sslmode=require',
+        },
         github: 'https://github.com/chinasilva/agent-sandbox',
       });
     }
@@ -388,10 +455,3 @@ export default async function handler(req, res) {
     });
   }
 }
-
-// Enable body parsing for POST requests
-export const config = {
-  api: {
-    bodyParser: true,
-  },
-};
