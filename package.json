@@ -5,8 +5,8 @@
   "type": "module",
   "main": "api/server.js",
   "scripts": {
-    "start": "node api/server.js",
-    "dev": "node --watch api/server.js"
+    "start": "node api/server-local.js",
+    "dev": "node --watch api/server-local.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3"
