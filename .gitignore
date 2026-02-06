@@ -41,3 +41,8 @@ docker-compose.override.yml
 .env.local
 .env.*.local
 .vercel
+
+# SQLite database files
+api/data/*.sqlite
+api/data/*.db
+!api/data/.gitkeep

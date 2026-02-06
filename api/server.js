@@ -1,34 +1,41 @@
 /**
- * Vercel Serverless Entry Point
- * Handles API requests for Vercel deployment
+ * Vercel Serverless Entry Point - SQLite Version
+ * No external database connection required!
  */
 
-import pg from 'pg';
-const { Pool } = pg;
+import initSqlJs from 'sql.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-// Database configuration
-const SUPABASE_URL = process.env.SANDBOX_POSTGRES_URL || process.env.sandbox_POSTGRES_URL;
-const pool = SUPABASE_URL ? new Pool({
-  connectionString: SUPABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: 10000,
-  max: 1,
-}) : null;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DB_PATH = path.join(__dirname, 'data', 'app.sqlite');
 
-let dbInitialized = false;
-
-// Simple in-memory store for demo mode
-const users = new Map();
-const tasks = new Map();
+// In-memory SQLite database
+let db = null;
+let dbReady = false;
 
 /**
- * Initialize database
+ * Initialize SQLite database
  */
 async function initDb() {
-  if (dbInitialized || !pool) return;
+  if (dbReady) return;
   
   try {
-    await pool.query(`
+    const SQL = await initSqlJs();
+    
+    // Try to load existing database
+    if (fs.existsSync(DB_PATH)) {
+      const buffer = fs.readFileSync(DB_PATH);
+      db = new SQL.Database(buffer);
+      console.log('✅ Loaded existing database');
+    } else {
+      db = new SQL.Database();
+      console.log('✅ Created new database');
+    }
+    
+    // Create tables
+    db.run(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
@@ -36,13 +43,55 @@ async function initDb() {
         api_key TEXT UNIQUE NOT NULL,
         credits INTEGER DEFAULT 100,
         is_admin INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    dbInitialized = true;
-    console.log('✅ Database initialized');
+    
+    db.run(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        tools TEXT,
+        status TEXT DEFAULT 'pending',
+        progress INTEGER DEFAULT 0,
+        step TEXT,
+        message TEXT,
+        result TEXT,
+        credits_used INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Save to file
+    saveDb();
+    
+    dbReady = true;
+    console.log('✅ SQLite database initialized');
   } catch (error) {
     console.error('❌ Database init failed:', error.message);
+  }
+}
+
+/**
+ * Save database to file
+ */
+function saveDb() {
+  if (!db) return;
+  
+  try {
+    const data = db.export();
+    const buffer = Buffer.from(data);
+    
+    // Ensure directory exists
+    const dir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    
+    fs.writeFileSync(DB_PATH, buffer);
+  } catch (error) {
+    console.error('Failed to save database:', error.message);
   }
 }
 
@@ -91,19 +140,10 @@ export default async function handler(req, res) {
   try {
     // Health check
     if (pathname === '/health') {
-      let dbStatus = 'not configured';
-      if (pool) {
-        try {
-          await pool.query('SELECT 1');
-          dbStatus = 'connected';
-        } catch (e) {
-          dbStatus = 'error: ' + e.message;
-        }
-      }
       return res.json({
         status: 'healthy',
-        mode: pool ? 'supabase' : 'demo',
-        database: dbStatus,
+        mode: 'sqlite',
+        database: dbReady ? 'ready' : 'initializing',
         timestamp: new Date().toISOString(),
       });
     }
@@ -113,8 +153,8 @@ export default async function handler(req, res) {
       return res.json({
         name: 'Agent Sandbox API',
         version: '1.0.0',
-        mode: pool ? 'supabase' : 'demo',
-        database: pool ? 'connected' : 'demo-mode',
+        mode: 'sqlite',
+        database: dbReady ? 'ready' : 'initializing',
         endpoints: [
           'GET /health',
           'POST /api/v1/auth/register',
@@ -147,25 +187,18 @@ export default async function handler(req, res) {
       const accessToken = Buffer.from(`${id}:${Date.now()}`).toString('base64');
       const refreshToken = crypto.randomUUID();
 
-      if (pool) {
-        try {
-          await pool.query(`
-            INSERT INTO users (id, username, password_hash, api_key, credits, is_admin)
-            VALUES ($1, $2, $3, $4, 100, 0)
-          `, [id, username, passwordHash, apiKey]);
-        } catch (error) {
-          if (error.code === '23505') {
-            return res.status(409).json({ error: 'Username already exists' });
-          }
-          throw error;
-        }
-      } else {
-        // Demo mode - store in memory
-        if (users.has(username)) {
-          return res.status(409).json({ error: 'Username already exists' });
-        }
-        users.set(username, { id, passwordHash, apiKey, credits: 100 });
+      // Check if username exists
+      const existing = db.exec(`SELECT id FROM users WHERE username = ?`, [username]);
+      if (existing.length > 0 && existing[0].values.length > 0) {
+        return res.status(409).json({ error: 'Username already exists' });
       }
+
+      // Insert user
+      db.run(
+        `INSERT INTO users (id, username, password_hash, api_key, credits, is_admin) VALUES (?, ?, ?, ?, 100, 0)`,
+        [id, username, passwordHash, apiKey]
+      );
+      saveDb();
 
       return res.status(201).json({
         message: 'User registered successfully',
@@ -185,23 +218,17 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Username and password required' });
       }
 
-      let user = null;
-
-      if (pool) {
-        const result = await pool.query(`SELECT * FROM users WHERE username = $1`, [username]);
-        user = result.rows[0];
-      } else {
-        user = users.get(username);
-      }
-
-      if (!user) {
+      const result = db.exec(`SELECT * FROM users WHERE username = ?`, [username]);
+      if (result.length === 0 || result[0].values.length === 0) {
         return res.status(401).json({ error: 'Invalid username or password' });
       }
 
-      const valid = pool 
-        ? await comparePassword(password, user.password_hash)
-        : await comparePassword(password, user.passwordHash);
+      const columns = result[0].columns;
+      const values = result[0].values[0];
+      const user = {};
+      columns.forEach((col, i) => user[col] = values[i]);
 
+      const valid = await comparePassword(password, user.password_hash);
       if (!valid) {
         return res.status(401).json({ error: 'Invalid username or password' });
       }
@@ -214,7 +241,7 @@ export default async function handler(req, res) {
         message: 'Login successful',
         user: {
           id: user.id,
-          username: pool ? user.username : username,
+          username: user.username,
           credits: user.credits,
           isAdmin: user.is_admin === 1,
         },
@@ -234,15 +261,15 @@ export default async function handler(req, res) {
       const token = authHeader.replace('Bearer ', '');
       const [userId] = Buffer.from(token, 'base64').toString().split(':');
 
-      let user = null;
-      if (pool) {
-        const result = await pool.query(`SELECT * FROM users WHERE id = $1`, [userId]);
-        user = result.rows[0];
-      }
-
-      if (!user) {
+      const result = db.exec(`SELECT id, username, api_key, credits, is_admin, created_at FROM users WHERE id = ?`, [userId]);
+      if (result.length === 0 || result[0].values.length === 0) {
         return res.status(401).json({ error: 'User not found' });
       }
+
+      const columns = result[0].columns;
+      const values = result[0].values[0];
+      const user = {};
+      columns.forEach((col, i) => user[col] = values[i]);
 
       return res.json({
         user: {
@@ -272,16 +299,13 @@ export default async function handler(req, res) {
 
       const crypto = await import('crypto');
       const taskId = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
 
-      tasks.set(taskId, {
-        id: taskId,
-        userId,
-        task,
-        tools: tools || [],
-        status: 'pending',
-        progress: 0,
-        created_at: new Date().toISOString(),
-      });
+      db.run(
+        `INSERT INTO tasks (id, user_id, task, tools, status, progress, message) VALUES (?, ?, ?, ?, 'pending', 0, 'Task queued')`,
+        [taskId, userId, task, JSON.stringify(tools || [])]
+      );
+      saveDb();
 
       return res.json({
         taskId,
@@ -303,11 +327,16 @@ export default async function handler(req, res) {
     // Poll task
     if (pathname.match(/^\/api\/v1\/tasks\/[^/]+\/poll$/) && method === 'GET') {
       const taskId = pathname.split('/')[4];
-      const task = tasks.get(taskId);
-
-      if (!task) {
+      const result = db.exec(`SELECT * FROM tasks WHERE id = ?`, [taskId]);
+      
+      if (result.length === 0 || result[0].values.length === 0) {
         return res.status(404).json({ error: 'Task not found' });
       }
+
+      const columns = result[0].columns;
+      const values = result[0].values[0];
+      const task = {};
+      columns.forEach((col, i) => task[col] = values[i]);
 
       return res.json({
         taskId: task.id,

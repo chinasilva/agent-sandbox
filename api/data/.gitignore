@@ -1,0 +1,4 @@
+# Ignore SQLite database files
+*.sqlite
+*.db
+!*.gitkeep
