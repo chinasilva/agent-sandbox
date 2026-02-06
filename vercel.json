@@ -1,34 +1,15 @@
 {
   "version": 2,
   "framework": null,
-  "buildCommand": "npm install",
-  "installCommand": "npm install",
+  "buildCommand": "npm install --no-optional",
+  "installCommand": "npm install --no-optional",
   "devCommand": "node api/server.js",
   "outputDirectory": "src/www",
   "regions": ["iad1"],
   "functions": {
     "api/server.js": {
       "runtime": "nodejs22.x",
-      "maxDuration": 30
+      "maxDuration": 10
     }
-  },
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, POST, PUT, DELETE, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, Authorization, X-API-Key"
-        }
-      ]
-    }
-  ]
+  }
 }
