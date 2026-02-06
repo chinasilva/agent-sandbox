@@ -3,14 +3,6 @@
   "buildCommand": "npm install --no-optional",
   "installCommand": "npm install --no-optional",
   "framework": null,
-  "rewrites": [
-    {
-      "source": "/api/:match*",
-      "destination": "/api/server.js"
-    },
-    {
-      "source": "/health",
-      "destination": "/api/server.js"
-    }
-  ]
+  "outputDirectory": "src/www",
+  "cleanUrls": true
 }
