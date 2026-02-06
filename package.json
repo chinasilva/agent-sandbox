@@ -20,7 +20,7 @@
     "octokit": "^3.0.0",
     "ioredis": "^5.4.1",
     "uuid": "^10.0.0",
-    "better-sqlite3": "^9.4.3",
+    "sql.js": "^1.10.3",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2"
   },

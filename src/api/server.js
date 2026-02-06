@@ -30,6 +30,7 @@ import {
   getAllUsers,
   getUserStats,
   usernameExists,
+  initDatabase,
 } from '../db/user.js';
 
 import {
@@ -310,7 +311,7 @@ async function handleRequest(req, res) {
         return sendJSON(res, 409, { error: 'Username already exists' });
       }
 
-      const user = createUser(username, password);
+      const user = await createUser(username, password);
       const tokens = generateTokenPair(user);
 
       return sendJSON(res, 201, {
@@ -335,7 +336,7 @@ async function handleRequest(req, res) {
         return sendJSON(res, 400, { error: 'Username and password required' });
       }
 
-      const user = validatePassword(username, password);
+      const user = await validatePassword(username, password);
       
       if (!user) {
         return sendJSON(res, 401, { error: 'Invalid username or password' });
@@ -372,7 +373,7 @@ async function handleRequest(req, res) {
         return sendJSON(res, 401, { error: 'Invalid refresh token' });
       }
 
-      const user = findUserById(decoded.userId);
+      const user = await findUserById(decoded.userId);
       if (!user) {
         return sendJSON(res, 401, { error: 'User not found' });
       }
@@ -400,9 +401,9 @@ async function handleRequest(req, res) {
         return sendJSON(res, 401, { error: 'Authentication required' });
       }
 
-      const user = findUserById(req.user.id);
-      const stats = getUserStats(req.user.id);
-      const credits = getCredits(req.user.id);
+      const user = await findUserById(req.user.id);
+      const stats = await getUserStats(req.user.id);
+      const credits = await getCredits(req.user.id);
 
       return sendJSON(res, 200, {
         user: {
@@ -430,7 +431,7 @@ async function handleRequest(req, res) {
         return sendJSON(res, 401, { error: 'Authentication required' });
       }
 
-      const newApiKey = regenerateApiKey(req.user.id);
+      const newApiKey = await regenerateApiKey(req.user.id);
 
       return sendJSON(res, 200, {
         message: 'API key regenerated',
@@ -462,7 +463,7 @@ async function handleRequest(req, res) {
         return sendJSON(res, 400, { error: 'User ID and amount required' });
       }
 
-      const updatedUser = updateCredits(userId, amount, description || 'Admin adjustment');
+      const updatedUser = await updateCredits(userId, amount, description || 'Admin adjustment');
 
       return sendJSON(res, 200, {
         message: 'Credits updated',
@@ -490,8 +491,8 @@ async function handleRequest(req, res) {
       const limit = parseInt(url.searchParams.get('limit')) || 20;
       const offset = parseInt(url.searchParams.get('offset')) || 0;
 
-      const tasks = getUserTasks(req.user.id, limit, offset);
-      const total = getUserTaskCount(req.user.id);
+      const tasks = await getUserTasks(req.user.id, limit, offset);
+      const total = await getUserTaskCount(req.user.id);
 
       return sendJSON(res, 200, {
         tasks,
@@ -521,7 +522,7 @@ async function handleRequest(req, res) {
         return sendJSON(res, 403, { error: 'Admin access required' });
       }
 
-      const users = getAllUsers();
+      const users = await getAllUsers();
 
       return sendJSON(res, 200, {
         users,
@@ -573,7 +574,7 @@ async function handleRequest(req, res) {
       taskStore.set(taskId, taskData);
       
       // Deduct credits
-      deductTaskCredits(req.user.id);
+      await deductTaskCredits(req.user.id);
       
       // Execute task asynchronously
       executeTask(taskData).then(result => {
@@ -749,17 +750,32 @@ async function handleRequest(req, res) {
 const PORT = config.server.port || 3000;
 const HOST = config.server.host || '0.0.0.0';
 
-const server = http.createServer(handleRequest);
+// Async startup
+async function startServer() {
+  try {
+    console.log('📦 Initializing database...');
+    await initDatabase();
+    console.log('✅ Database initialized');
+    
+    const server = http.createServer(handleRequest);
+    
+    server.listen(PORT, HOST, () => {
+      console.log(`🚀 Agent Sandbox running on http://${HOST}:${PORT}`);
+      console.log(`📋 Health: http://${HOST}:${PORT}/health`);
+      console.log(`✅ Skills loaded: ${skills.size}`);
+      console.log(`🎯 Mode: ${redisAvailable ? 'Redis' : 'Memory'}`);
+      console.log(`👥 User system: enabled (SQLite)`);
+    });
+    
+    process.on('SIGTERM', () => {
+      console.log('Shutting down...');
+      server.close(() => process.exit(0));
+    });
+    
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
 
-server.listen(PORT, HOST, () => {
-  console.log(`🚀 Agent Sandbox running on http://${HOST}:${PORT}`);
-  console.log(`📋 Health: http://${HOST}:${PORT}/health`);
-  console.log(`✅ Skills loaded: ${skills.size}`);
-  console.log(`🎯 Mode: ${redisAvailable ? 'Redis' : 'Memory'}`);
-  console.log(`👥 User system: enabled (SQLite)`);
-});
-
-process.on('SIGTERM', () => {
-  console.log('Shutting down...');
-  server.close(() => process.exit(0));
-});
+startServer();
