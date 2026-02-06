@@ -6,9 +6,21 @@
 import jwt from 'jsonwebtoken';
 import { findUserByApiKey, findUserById } from '../db/user.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'agent-sandbox-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+
+// jwtSecret is now mandatory - must be set via environment variable
+let jwtSecret = process.env.jwtSecret;
+
+// In development mode, generate a temporary secret (with warning)
+if (!jwtSecret) {
+  if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') {
+    jwtSecret = `dev-secret-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    console.warn('⚠️  WARNING: Using temporary JWT secret for development. Set jwtSecret environment variable for production!');
+  } else {
+    throw new Error('❌ jwtSecret environment variable is required. Set it before starting the server.');
+  }
+}
 
 /**
  * Generate JWT token for user
@@ -26,7 +38,7 @@ export function generateToken(user, type = 'access') {
     type,
   };
   
-  return jwt.sign(payload, JWT_SECRET, { expiresIn });
+  return jwt.sign(payload, jwtSecret, { expiresIn });
 }
 
 /**
@@ -36,7 +48,7 @@ export function generateToken(user, type = 'access') {
  */
 export function verifyToken(token) {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, jwtSecret);
   } catch (error) {
     return null;
   }
