@@ -1,17 +1,6 @@
 {
   "name": "agent-sandbox",
   "version": "1.0.0",
-  "description": "Agent Sandbox - AI-powered task execution platform",
   "type": "module",
-  "main": "api/index.js",
-  "scripts": {
-    "start": "node api/server-local.js",
-    "dev": "node --watch api/server-local.js"
-  },
-  "dependencies": {
-    "bcryptjs": "^2.4.3"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "main": "api/index.js"
 }
