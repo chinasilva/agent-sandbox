@@ -1,20 +1,5 @@
 {
   "framework": null,
   "buildCommand": "npm install --no-optional",
-  "outputDirectory": "src/www",
-  "functions": {
-    "api/server.js": {
-      "runtime": "nodejs22.x"
-    }
-  },
-  "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "/api/server.js"
-    },
-    {
-      "source": "/health",
-      "destination": "/api/server.js"
-    }
-  ]
+  "outputDirectory": "src/www"
 }
